@@ -1,0 +1,189 @@
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { UseQueryResult } from '@tanstack/react-query'
+import { LeaderboardPage } from './LeaderboardPage'
+import { useStocksQuery } from '../../api/queries'
+import { CONNECTION_LOST_MESSAGE } from '../../components/shared/ConnectionBanner/ConnectionBanner'
+import type { StockSummary, StocksResponse } from '../../api/types'
+
+vi.mock('../../api/queries', () => ({
+  useStocksQuery: vi.fn(),
+}))
+
+// Isolate the page from StockTable's own rendering/implementation status —
+// LeaderboardPage's job is only to decide *whether* to render StockTable
+// and *what* to pass it, per the "minimal page" convention.
+vi.mock('../../components/leaderboard/StockTable/StockTable', () => ({
+  StockTable: ({ stocks, isDegraded }: { stocks: StockSummary[]; isDegraded?: boolean }) => (
+    <div data-testid="stock-table" data-degraded={String(Boolean(isDegraded))}>
+      {stocks.map((s) => s.ticker).join(',')}
+    </div>
+  ),
+}))
+
+const mockedUseStocksQuery = vi.mocked(useStocksQuery)
+
+function makeStock(overrides: Partial<StockSummary> = {}): StockSummary {
+  return {
+    ticker: 'AZN.L',
+    name: 'AstraZeneca',
+    sector: 'Pharma',
+    price: 112.34,
+    currency: 'GBP',
+    previous_close: 110,
+    change: 2.34,
+    change_percent: 2.13,
+    is_stale: false,
+    error: null,
+    ...overrides,
+  }
+}
+
+function queryResult(
+  overrides: Partial<UseQueryResult<StocksResponse, Error>>,
+): UseQueryResult<StocksResponse, Error> {
+  return {
+    data: undefined,
+    error: null,
+    isLoading: false,
+    isPending: false,
+    isSuccess: false,
+    isError: false,
+    ...overrides,
+  } as unknown as UseQueryResult<StocksResponse, Error>
+}
+
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <LeaderboardPage />
+    </MemoryRouter>,
+  )
+}
+
+describe('LeaderboardPage', () => {
+  beforeEach(() => {
+    mockedUseStocksQuery.mockReset()
+  })
+
+  it('renders a loading state while the query is pending', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({ isLoading: true, isPending: true }),
+    )
+
+    renderPage()
+
+    expect(screen.getByText(/loading/i)).toBeInTheDocument()
+    expect(screen.queryByTestId('stock-table')).not.toBeInTheDocument()
+  })
+
+  /**
+   * v3 error UX (replaces the pre-v3 "renders a page-level error banner"
+   * assertion): the backend being unreachable produces ONE calm message,
+   * and the last successfully fetched board stays on screen behind it.
+   */
+  it('shows a single calm communication-loss message when the query errors', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({ isError: true, error: new Error('network down') }),
+    )
+
+    renderPage()
+
+    expect(screen.getAllByText(CONNECTION_LOST_MESSAGE)).toHaveLength(1)
+    // Calm, not a red wall: announced politely, and the raw error is never shown.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText(/network down/i)).not.toBeInTheDocument()
+  })
+
+  it('keeps the last successfully fetched table, greyed out, when the query errors', () => {
+    const stocks = [
+      makeStock({ ticker: 'AZN.L', name: 'AstraZeneca' }),
+      makeStock({ ticker: 'GSK.L', name: 'GSK' }),
+    ]
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({
+        isError: true,
+        error: new Error('network down'),
+        data: { updated_at: '2026-08-19T12:00:00Z', stocks },
+      }),
+    )
+
+    renderPage()
+
+    expect(screen.getByTestId('stock-table')).toHaveTextContent('AZN.L,GSK.L')
+    expect(screen.getByTestId('stock-table')).toHaveAttribute('data-degraded', 'true')
+    expect(screen.getByText(CONNECTION_LOST_MESSAGE)).toBeInTheDocument()
+  })
+
+  it('shows an empty state rather than a spinner when the query errors with no data ever', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({ isError: true, error: new Error('network down') }),
+    )
+
+    renderPage()
+
+    expect(screen.getByText(CONNECTION_LOST_MESSAGE)).toBeInTheDocument()
+    expect(screen.getByText(/no figures received yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('stock-table')).not.toBeInTheDocument()
+  })
+
+  it('does not grey the table out while the query is healthy', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({
+        isSuccess: true,
+        data: { updated_at: '2026-08-19T12:00:00Z', stocks: [makeStock()] },
+      }),
+    )
+
+    renderPage()
+
+    expect(screen.getByTestId('stock-table')).toHaveAttribute('data-degraded', 'false')
+  })
+
+  it('renders StockTable with the fetched stocks on success', () => {
+    const stocks = [
+      makeStock({ ticker: 'AZN.L', name: 'AstraZeneca' }),
+      makeStock({ ticker: 'GSK.L', name: 'GSK' }),
+    ]
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({
+        isSuccess: true,
+        data: { updated_at: '2026-08-19T12:00:00Z', stocks },
+      }),
+    )
+
+    renderPage()
+
+    expect(screen.getByTestId('stock-table')).toHaveTextContent('AZN.L,GSK.L')
+  })
+
+  it('does not render the communication-loss message on success', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({
+        isSuccess: true,
+        data: { updated_at: '2026-08-19T12:00:00Z', stocks: [] },
+      }),
+    )
+
+    renderPage()
+
+    expect(screen.queryByText(CONNECTION_LOST_MESSAGE)).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('does not render a loading state once data has resolved', () => {
+    mockedUseStocksQuery.mockReturnValue(
+      queryResult({
+        isSuccess: true,
+        data: { updated_at: '2026-08-19T12:00:00Z', stocks: [makeStock()] },
+      }),
+    )
+
+    renderPage()
+
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument()
+  })
+})

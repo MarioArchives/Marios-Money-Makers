@@ -1,0 +1,31 @@
+.change-indicator {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.change-indicator__arrow {
+  font-size: 0.6em;
+  line-height: 1;
+  transform: translateY(-0.1em);
+}
+
+.change-indicator__value {
+  font-variant-numeric: tabular-nums;
+}
+
+.change-indicator.up {
+  color: var(--color-up);
+}
+
+.change-indicator.down {
+  color: var(--color-down);
+}
+
+.change-indicator.neutral {
+  color: var(--color-neutral);
+}

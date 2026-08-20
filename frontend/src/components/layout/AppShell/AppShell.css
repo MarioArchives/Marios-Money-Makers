@@ -1,0 +1,155 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* Pastel-yellow bar, brass hairline, navy ink — the masthead is the one
+   tinted element so the paper-white page below stays quiet. */
+.app-shell__bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-bar);
+  color: var(--color-bar-text);
+  border-bottom: 2px solid var(--color-accent);
+  transition:
+    padding var(--motion-base) var(--ease),
+    box-shadow var(--motion-base) var(--ease);
+}
+
+/* Scrolled: the bar tightens, lifts, and hands the centre to the mark. */
+.app-shell__bar.is-condensed {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  box-shadow: 0 8px 20px -14px rgb(16 31 46 / 55%);
+}
+
+.app-shell__bar.is-condensed .app-shell__title {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.app-shell__menu {
+  display: flex;
+  gap: var(--space-4);
+  justify-self: start;
+}
+
+.app-shell__link {
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-bar-text-muted);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid transparent;
+  transition:
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease);
+}
+
+.app-shell__link:hover {
+  color: var(--color-bar-text);
+}
+
+.app-shell__link.active {
+  color: var(--color-bar-text);
+  border-bottom-color: var(--color-accent);
+}
+
+.app-shell__link:focus-visible {
+  outline-offset: 4px;
+}
+
+/* Centred masthead. Letterspaced Gill Sans — the only display type in the
+   chrome, so it reads as an engraved plate rather than an app name. */
+.app-shell__title {
+  justify-self: center;
+  transition:
+    opacity var(--motion-base) var(--ease),
+    visibility var(--motion-base) var(--ease);
+  font-family: var(--headder-font);
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  white-space: nowrap;
+  font-weight: bold;
+}
+
+.app-shell__content {
+  flex: 1;
+  width: 100%;
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+}
+
+@media (max-width: 40rem) {
+  .app-shell__bar {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: var(--space-2);
+    text-align: center;
+  }
+
+  .app-shell__menu {
+    justify-self: center;
+    order: 2;
+  }
+
+  .app-shell__title {
+    justify-self: center;
+    order: 1;
+    font-size: var(--text-base);
+  }
+
+  .app-shell__content {
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+}
+
+/* The M-cubed mark: an engraved plate pinned to the bar's right edge.
+   Absolutely positioned via left+transform so the ride to the centre in
+   the condensed state is one smooth transition. */
+
+.app-shell__logo {
+  font-family: var(--headder-font);
+  font-weight: bold;
+  position: absolute;
+  top: 50%;
+  left: calc(100% - var(--space-5));
+  transform: translate(-100%, -50%);
+  display: inline-flex;
+  align-items: flex-start;
+  font-weight: 700;
+  font-size: var(--text-md);
+  color: var(--color-bar-text);
+  /* border: 1px solid var(--color-bar-text); */
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  line-height: 1.5;
+  transition:
+    left var(--motion-base) var(--ease),
+    transform var(--motion-base) var(--ease);
+}
+
+.app-shell__bar.is-condensed .app-shell__logo {
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* The cube: raised to the M's shoulder — top right, never baseline. */
+.app-shell__logo-sup {
+  border: 0 solid black;
+  font-size: 0.6em;
+  line-height: 1;
+  margin-left: 1px;
+  transform: translateY(-0.35em);
+}

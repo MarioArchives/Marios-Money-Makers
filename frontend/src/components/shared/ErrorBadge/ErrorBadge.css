@@ -1,0 +1,13 @@
+/* A hollow ring, not a filled alarm dot: it marks "last edition" rather
+   than "something is wrong". Sized to sit on the baseline of the stats
+   column without shifting it. */
+.stale-dot {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid currentcolor;
+  color: var(--color-text-faint);
+  opacity: 0.85;
+}

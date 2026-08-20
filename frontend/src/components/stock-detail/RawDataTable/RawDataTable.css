@@ -1,0 +1,82 @@
+.raw-data-table {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  transition: opacity var(--motion-base) var(--ease);
+}
+
+.raw-data-table__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* The list can run long; it scrolls inside the card rather than pushing
+   the page. */
+.raw-data-table__scroll {
+  max-height: 20rem;
+  overflow: auto;
+  border-top: 1px solid var(--color-border);
+}
+
+.raw-data-table__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.raw-data-table__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-surface);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wider);
+  color: var(--color-text-faint);
+  text-align: left;
+  padding: var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.raw-data-table__table th:last-child {
+  text-align: right;
+}
+
+.raw-data-table__table td {
+  padding: 0.35rem var(--space-2);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-surface-sunken);
+  white-space: nowrap;
+}
+
+.raw-data-table__close {
+  text-align: right;
+  color: var(--color-text);
+}
+
+.raw-data-table__table tbody tr:hover td {
+  background: var(--color-surface-sunken);
+}
+
+.raw-data-table__empty {
+  margin: 0;
+  padding: var(--space-4) 0;
+  color: var(--color-text-faint);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.raw-data-table.is-stale {
+  opacity: var(--stale-opacity);
+}
+
+@media (max-width: 34rem) {
+  .raw-data-table {
+    padding: var(--space-4);
+  }
+}

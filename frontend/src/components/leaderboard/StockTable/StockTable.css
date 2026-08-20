@@ -1,0 +1,43 @@
+.stock-table {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  transition: opacity var(--motion-base) var(--ease);
+}
+
+/* Column labels sit on the paper, not on a header bar — the rows are the
+   only raised objects on the page. */
+.stock-table__head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(6.5rem, auto);
+  gap: var(--space-4);
+  padding: 0 var(--space-4) var(--space-1) var(--space-5);
+}
+
+.stock-table__head-price,
+.stock-table__head-stats {
+  text-align: right;
+}
+
+.stock-table__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Whole-board degradation: the same fade a single stale row gets, applied
+   once at the top so individual rows don't compound it. */
+.stock-table--degraded {
+  opacity: var(--stale-opacity);
+}
+
+.stock-table--degraded .stock-row.is-stale {
+  opacity: 1;
+}
+
+@media (max-width: 34rem) {
+  .stock-table__head {
+    display: none;
+  }
+}

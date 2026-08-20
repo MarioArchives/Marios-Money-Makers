@@ -1,0 +1,128 @@
+/* Wireframe's three-column pill: name+icon | price | stats. */
+.stock-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(6.5rem, auto);
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: background var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease), opacity var(--motion-base) var(--ease);
+}
+
+/* The direction spine — the signature mark. Colour arrives at the leading
+   edge of the row before the reader reaches the figures. */
+.stock-row::before {
+  content: '';
+  position: absolute;
+  inset: var(--space-2) auto var(--space-2) 0;
+  width: 3px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--color-neutral);
+}
+
+.stock-row--up::before {
+  background: var(--color-up);
+}
+
+.stock-row--down::before {
+  background: var(--color-down);
+}
+
+.stock-row--flat::before {
+  background: var(--color-border-strong);
+}
+
+.stock-row:hover {
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-lift);
+  transform: translateY(-1px);
+}
+
+.stock-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.stock-row__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.stock-row__name-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.stock-row__company {
+  font-size: var(--text-base);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stock-row__ticker {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-text-faint);
+}
+
+.stock-row__price {
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.stock-row__stats {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* --- Degraded row -------------------------------------------------------
+   One treatment, driven by the global stale tokens: fade the ink, drop the
+   direction colour, keep the figures. */
+.stock-row.is-stale {
+  opacity: var(--stale-opacity);
+  background: var(--color-surface-sunken);
+}
+
+.stock-row.is-stale::before {
+  background: var(--color-border-strong);
+}
+
+.stock-row.is-stale .stock-row__price,
+.stock-row.is-stale .change-indicator {
+  color: var(--stale-ink);
+}
+
+.stock-row.is-stale:hover {
+  opacity: 0.75;
+}
+
+@media (max-width: 34rem) {
+  .stock-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-2) var(--space-3);
+    padding-left: var(--space-4);
+  }
+
+  .stock-row__stats {
+    grid-column: 2;
+  }
+}

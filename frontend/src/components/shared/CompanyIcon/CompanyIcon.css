@@ -1,0 +1,9 @@
+.company-icon {
+  display: inline-block;
+  flex: none;
+  border-radius: 50%;
+  object-fit: contain;
+  background: var(--color-surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  padding: 2px;
+}

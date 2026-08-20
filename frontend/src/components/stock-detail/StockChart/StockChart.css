@@ -1,0 +1,43 @@
+.stock-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-5);
+  transition: opacity var(--motion-base) var(--ease);
+}
+
+.stock-chart__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.stock-chart__interval {
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-wide);
+  text-transform: none;
+}
+
+/* The plot's `color` is what the recharts Line reads via
+   stroke="currentColor", so the series follows the theme token. */
+.stock-chart__plot {
+  width: 100%;
+  height: 300px;
+  color: var(--color-chart-line);
+}
+
+.stock-chart.is-stale {
+  opacity: var(--stale-opacity);
+}
+
+@media (max-width: 34rem) {
+  .stock-chart {
+    padding: var(--space-4);
+  }
+
+  .stock-chart__plot {
+    height: 220px;
+  }
+}

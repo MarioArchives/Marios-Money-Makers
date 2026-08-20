@@ -1,0 +1,40 @@
+.price-ticker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+  transition: opacity var(--motion-base) var(--ease);
+}
+
+.price-ticker__price {
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.035em;
+  color: var(--color-text);
+}
+
+.price-ticker__stats {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.price-ticker.is-stale {
+  opacity: var(--stale-opacity);
+}
+
+.price-ticker.is-stale .price-ticker__price,
+.price-ticker.is-stale .change-indicator {
+  color: var(--stale-ink);
+}
+
+@media (max-width: 34rem) {
+  .price-ticker {
+    align-items: flex-start;
+  }
+
+  .price-ticker__price {
+    font-size: var(--text-xl);
+  }
+}

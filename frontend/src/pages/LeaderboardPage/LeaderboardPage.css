@@ -1,0 +1,13 @@
+.leaderboard-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.leaderboard-page__loading,
+.leaderboard-page__empty {
+  margin: 0;
+  padding: var(--space-6) 0;
+  color: var(--color-text-faint);
+  font-size: var(--text-sm);
+  text-align: center;
+}

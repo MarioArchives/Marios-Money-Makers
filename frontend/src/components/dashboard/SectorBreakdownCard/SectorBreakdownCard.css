@@ -1,0 +1,4 @@
+/* The shared `.dashboard-card` treatment (surface, hairline, radius,
+   placeholder pill, description) lives once in src/styles/global.css so the
+   three placeholder cards cannot drift apart. This file is kept for the
+   4-file component convention and holds only SectorBreakdownCard-specific rules. */
