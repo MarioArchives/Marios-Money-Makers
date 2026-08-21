@@ -3,14 +3,17 @@
 Without this module, nothing refreshes the ``bars_minute`` / ``bars_hour``
 / ``bars_month`` tables except a user opening a chart, so after the
 backend has been down for a while (or has simply had no chart viewers)
-most of the 20 tickers' history is frozen or empty. :func:`sweep` walks
-every (tier, ticker) pair -- tier-major, so all the cheap minute bars land
-before the hourly and daily ones -- and, for each pair whose ``fetch_log``
-entry has lapsed past the tier's freshness window, calls
-:func:`app.routers.stocks.refresh_history`: the very same lock + fetch +
-upsert + ``record_fetch`` + prune path the history endpoint uses, so a
-request and the sweep can never double-fetch a pair or disagree about
-what "fresh" means. Fresh pairs cost zero Alpaca calls.
+most of the 20 tickers' history is frozen or empty. :func:`sweep` first
+refreshes the leaderboard's ``summaries`` table if it is stale
+(:func:`app.routers.stocks.refresh_summaries` -- one snapshots call, so a
+restarted backend has a populated board before any browser polls), then
+walks every (tier, ticker) pair -- tier-major, so all the cheap minute
+bars land before the hourly and daily ones -- and, for each pair whose
+``fetch_log`` entry has lapsed past the tier's freshness window, calls
+:func:`app.routers.stocks.refresh_history`: the very same lock + lease +
+fetch + upsert + ``record_fetch`` + prune path the history endpoint uses,
+so a request and the sweep can never double-fetch a pair or disagree
+about what "fresh" means. Fresh pairs cost zero Alpaca calls.
 
 Failure policy: the sweep must never crash the process. A rate-limited
 fetch pauses ``config.BACKFILL_RATE_LIMIT_PAUSE_SECONDS`` and retries that
@@ -69,9 +72,24 @@ async def _refresh_pair(ticker: str, tier: str) -> None:
             return
 
 
+async def _refresh_summaries() -> None:
+    """Refresh the leaderboard's ``summaries`` table if stale; never raises."""
+    try:
+        await stocks_router.refresh_summaries()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - the sweep must never crash
+        logger.exception("backfill: unexpected error refreshing summaries")
+
+
 async def sweep() -> None:
-    """One pass over every (tier, ticker): refresh the stale pairs, skip the fresh."""
+    """One pass: refresh the leaderboard table, then every stale (tier, ticker) pair."""
     logger.info("backfill: sweep starting")
+    # Leaderboard first: after a restart this repopulates the `summaries`
+    # table (one snapshots call) before any browser polls. Fresh-skipping
+    # and single-flight like everything else, so a concurrent request
+    # can't make it double-fetch.
+    await _refresh_summaries()
     for tier in TIERS:
         _timeframe, _window, freshness = stocks_router._SPEC_BY_TIER[tier]
         for ticker in TICKER_SYMBOLS:

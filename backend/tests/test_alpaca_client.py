@@ -30,6 +30,7 @@ def _fake_credentials(monkeypatch):
     monkeypatch.setattr(config, "ALPACA_SECRET_KEY", "test-secret")
     monkeypatch.setattr(config, "ALPACA_DATA_BASE_URL", "https://data.alpaca.test")
     monkeypatch.setattr(config, "ALPACA_FEED", "iex")
+    monkeypatch.setattr(config, "ALPACA_BARS_ADJUSTMENT", "split")
     yield
 
 
@@ -145,6 +146,8 @@ class TestFetchSummaries:
         assert request.url.path == "/v2/stocks/snapshots"
         assert set(request.url.params["symbols"].split(",")) == {"AAPL", "MSFT"}
         assert request.url.params["feed"] == "iex"
+        # The snapshots endpoint has no `adjustment` param; never send one.
+        assert "adjustment" not in request.url.params
         assert request.headers["APCA-API-KEY-ID"] == "test-key-id"
         assert request.headers["APCA-API-SECRET-KEY"] == "test-secret"
 
@@ -277,11 +280,39 @@ class TestFetchBars:
         params = request.url.params
         assert params["timeframe"] == "1Min"
         assert params["feed"] == "iex"
+        # Split-adjusted history (Alpaca's default `raw` draws a split as
+        # a price cliff).
+        assert params["adjustment"] == "split"
         # `start` is RFC3339 for the given datetime...
         assert params["start"].startswith("2026-08-19T12:00:00")
         # ...and `end` must be omitted so Alpaca defaults to "now".
         assert "end" not in params
         assert request.headers["APCA-API-KEY-ID"] == "test-key-id"
+
+    @pytest.mark.parametrize(
+        "timeframe",
+        [
+            alpaca_client.TIMEFRAME_MINUTE,
+            alpaca_client.TIMEFRAME_HOUR,
+            alpaca_client.TIMEFRAME_MONTH,
+        ],
+    )
+    def test_adjustment_sent_on_every_timeframe_and_honours_config(
+        self, monkeypatch, timeframe
+    ):
+        monkeypatch.setattr(config, "ALPACA_BARS_ADJUSTMENT", "all")
+        seen = _install(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, json={"bars": [], "next_page_token": None}
+            ),
+        )
+
+        alpaca_client.fetch_bars("AAPL", timeframe, START)
+
+        assert len(seen) == 1
+        assert seen[0].url.params["timeframe"] == timeframe
+        assert seen[0].url.params["adjustment"] == "all"
 
     def test_returns_normalized_bars(self, monkeypatch):
         payload = {

@@ -28,7 +28,10 @@ Requests carry the ``APCA-API-KEY-ID`` / ``APCA-API-SECRET-KEY`` headers
 (from ``app.config.ALPACA_KEY_ID`` / ``ALPACA_SECRET_KEY``, read at call
 time) and ``feed=iex`` (free plan). Bars requests send ``start`` but no
 ``end`` (Alpaca defaults to "now", which the IEX feed may serve without
-the paid plan's 15-minute SIP restriction).
+the paid plan's 15-minute SIP restriction), plus
+``adjustment=<ALPACA_BARS_ADJUSTMENT>`` (default ``split``) so history is
+split-adjusted rather than Alpaca's default as-traded ``raw`` prices; the
+snapshots request has no adjustment param and never sends one.
 
 Timestamps are normalized to exactly ``YYYY-MM-DDTHH:MM:SSZ`` (UTC) so
 that lexicographic string comparison in SQLite equals chronological order.
@@ -106,8 +109,9 @@ def normalize_timestamp(raw: str) -> str:
 def _client() -> httpx.Client:
     """Build an ``httpx.Client`` for the Alpaca data API.
 
-    Base URL, credentials and feed are read from ``app.config`` at call
-    time (monkeypatch-friendly); ``_transport`` is injected when set.
+    Base URL, credentials, feed and the request timeout
+    (``ALPACA_TIMEOUT_SECONDS``) are read from ``app.config`` at call time
+    (monkeypatch-friendly); ``_transport`` is injected when set.
     """
     from app import config
 
@@ -115,7 +119,11 @@ def _client() -> httpx.Client:
         "APCA-API-KEY-ID": config.ALPACA_KEY_ID,
         "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
     }
-    kwargs: dict = {"base_url": config.ALPACA_DATA_BASE_URL, "headers": headers}
+    kwargs: dict = {
+        "base_url": config.ALPACA_DATA_BASE_URL,
+        "headers": headers,
+        "timeout": config.ALPACA_TIMEOUT_SECONDS,
+    }
     if _transport is not None:
         kwargs["transport"] = _transport
     return httpx.Client(**kwargs)
@@ -269,6 +277,7 @@ def fetch_bars(symbol: str, timeframe: str, start: datetime) -> list[Bar]:
             params = {
                 "timeframe": timeframe,
                 "feed": config.ALPACA_FEED,
+                "adjustment": config.ALPACA_BARS_ADJUSTMENT,
                 "start": start.isoformat().replace("+00:00", "Z"),
                 "limit": 1000,
             }

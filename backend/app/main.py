@@ -3,7 +3,8 @@
 Creates the `FastAPI` app, configures CORS from
 `app.config.ALLOWED_ORIGINS` (GET-only, per the plan's error-handling
 section), and wires up the stocks router. The lifespan hook initialises
-the SQLite store and, unless `app.config.BACKFILL_ENABLED` is off, runs
+the SQLite store (and invalidates stale bar fetch stamps if
+``ALPACA_BARS_ADJUSTMENT`` changed since the DB was last used) and, unless `app.config.BACKFILL_ENABLED` is off, runs
 the :mod:`app.backfill` sweep as a background task for the life of the
 process (cancelled on shutdown). This module is plumbing (app
 construction + middleware configuration), not business logic.
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     lifespans without starting a real sweep.
     """
     storage.init_db()
+    storage.ensure_bars_adjustment(config.ALPACA_BARS_ADJUSTMENT)
     task: asyncio.Task[None] | None = None
     if config.BACKFILL_ENABLED:
         task = asyncio.create_task(backfill.run_forever(), name="backfill")

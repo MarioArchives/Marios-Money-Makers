@@ -6,7 +6,11 @@ so no real network calls are made. `app.storage` is NOT mocked: the SQLite
 store is the feature under test, and every test gets its own tmp-path DB
 via a monkeypatched `app.config.DB_PATH` (which `storage` reads at call
 time). Each test also gets fresh module-level state (`_reset_state`) so
-tests never leak caches/backoff/locks between each other.
+tests never leak backoff/locks between each other. There is no in-memory
+leaderboard cache any more: the `summaries` table is the cache, so "a
+batch already succeeded once" is seeded by writing that table
+(`_prime_stale`); `tests/test_leaderboard_table.py` covers the table's
+own single-flight / lease / restart semantics in depth.
 
 Two fake clocks, mirroring the repo's established pattern:
 - `fake_clock` replaces `stocks_router._monotonic` (backoff windows).
@@ -35,7 +39,6 @@ from fastapi.testclient import TestClient
 import app.routers.stocks as stocks_router
 from app import config, storage
 from app.alpaca_client import Bar, AlpacaError
-from app.cache import TTLCacheWithLock
 from app.config import (
     ALLOWED_ORIGINS,
     CACHE_TTL_SECONDS,
@@ -61,9 +64,8 @@ def _iso(dt: datetime) -> str:
 def _reset_state(monkeypatch, tmp_path):
     """Fresh tmp DB + fresh module-level router state for every test."""
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "stocks.db"))
-    stocks_router._stocks_cache = TTLCacheWithLock(ttl=CACHE_TTL_SECONDS)
     stocks_router._backoff = stocks_router._BackoffState()
-    stocks_router._history_locks = {}
+    stocks_router._refresh_locks = {}
     yield
 
 
@@ -182,6 +184,25 @@ def _failed_batch(
 def _seed_minute_rows(ticker: str, bars: list[Bar], recorded_at: str) -> None:
     storage.init_db()
     storage.upsert_bars("minute", ticker, bars, recorded_at)
+
+
+def _prime_stale(age_seconds: float = CACHE_TTL_SECONDS + 5) -> dict[str, StockSummary]:
+    """Seed "a batch fetch already succeeded once" via the `summaries` table.
+
+    The stamp is `age_seconds` in the past (relative to the real clock,
+    which is what `stocks_router._utcnow` is unless a test fakes it), i.e.
+    outside the TTL by default, so the next request attempts a refresh.
+    """
+    good = _all_success_summaries()
+    fetched_at = _iso(
+        datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    )
+    storage.upsert_summaries(stocks_router._summary_rows(good), fetched_at)
+    return good
+
+
+def _summaries_stamp() -> str | None:
+    return storage.last_fetch_at(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY)
 
 
 def _table_rows(table: str) -> list[tuple]:
@@ -353,22 +374,16 @@ class TestTotalFailureServesStale:
     """A fully rate-limited batch must not blank the page.
 
     `fetch_summaries` never raises, so an all-error batch would otherwise
-    look like a *successful* fetch to `get_or_fetch` and be cached,
-    clobbering the stale shadow store. Fallback preference on total
-    failure: in-memory stale -> SQLite minute rows -> error-flagged batch.
+    be written over the last good rows in the `summaries` table. Fallback
+    preference on total failure: the `summaries` table marked stale ->
+    the error-flagged batch itself.
     """
-
-    def _prime_stale(self) -> dict[str, StockSummary]:
-        """Seed "a batch fetch already succeeded once" via the shadow store."""
-        good = _all_success_summaries()
-        stocks_router._stocks_cache._stale[stocks_router.STOCKS_CACHE_KEY] = good
-        return good
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_total_failure_serves_last_known_good_batch_marked_stale(
         self, mock_fetch, client
     ):
-        good = self._prime_stale()
+        good = _prime_stale()
         mock_fetch.return_value = _failed_batch()
 
         response = client.get("/api/stocks")
@@ -385,42 +400,33 @@ class TestTotalFailureServesStale:
             assert stock["is_stale"] is True
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
-    def test_failed_batch_is_not_cached_and_does_not_clobber_stale(
+    def test_failed_batch_is_not_stored_and_does_not_clobber_table(
         self, mock_fetch, client
     ):
-        good = self._prime_stale()
+        good = _prime_stale()
+        stamp_before = _summaries_stamp()
         mock_fetch.return_value = _failed_batch()
 
         client.get("/api/stocks")
 
-        # The all-error batch must not have been stored anywhere: this is
-        # the exact bug that blanked the page.
-        assert stocks_router.STOCKS_CACHE_KEY not in stocks_router._stocks_cache._cache
-        surviving = stocks_router._stocks_cache.get_stale(
-            stocks_router.STOCKS_CACHE_KEY
-        )
-        assert surviving is not None
+        # The all-error batch must not have been written anywhere: this is
+        # the exact bug that blanked the page. Table rows AND the fetch_log
+        # stamp are untouched (so the next poll retries once backoff lifts).
+        surviving = storage.get_summaries()
+        assert len(surviving) == 20
         assert surviving["AAPL"].price == pytest.approx(good["AAPL"].price)
         assert surviving["AAPL"].error is None
+        assert _summaries_stamp() == stamp_before
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
-    def test_total_failure_with_cold_memory_serves_db_minute_rows(
+    def test_total_failure_with_cold_memory_serves_summaries_table(
         self, mock_fetch, client
     ):
-        # In-memory cache has never been populated (e.g. backend restart),
-        # but a previous process persisted minute bars: the DB is the
-        # backup and must back the leaderboard. Tickers without stored
-        # rows keep their error-flagged entry.
-        _seed_minute_rows(
-            "AAPL",
-            [_bar(_iso(NOW - timedelta(minutes=3)), 315.5)],
-            _iso(NOW - timedelta(minutes=3)),
-        )
-        _seed_minute_rows(
-            "MSFT",
-            [_bar(_iso(NOW - timedelta(minutes=3)), 484.4)],
-            _iso(NOW - timedelta(minutes=3)),
-        )
+        # This process has never fetched (e.g. backend restart), but a
+        # previous process wrote the `summaries` table: the DB is the
+        # backup and must back the leaderboard -- with price AND
+        # previous_close/change intact, just flagged stale.
+        good = _prime_stale(age_seconds=3600)
         mock_fetch.return_value = _failed_batch()
 
         response = client.get("/api/stocks")
@@ -430,15 +436,13 @@ class TestTotalFailureServesStale:
         assert len(body["stocks"]) == 20
         by_ticker = {s["ticker"]: s for s in body["stocks"]}
         aapl = by_ticker["AAPL"]
-        assert aapl["price"] == pytest.approx(315.5)
-        assert aapl["previous_close"] is None
-        assert aapl["change"] is None
+        assert aapl["price"] == pytest.approx(good["AAPL"].price)
+        assert aapl["previous_close"] == pytest.approx(good["AAPL"].previous_close)
+        assert aapl["change"] == pytest.approx(good["AAPL"].change)
+        assert aapl["change_percent"] == pytest.approx(good["AAPL"].change_percent)
         assert aapl["is_stale"] is True
         assert aapl["error"] is None
-        # No stored row for NFLX: its error entry from the failed batch
-        # survives untouched.
-        assert by_ticker["NFLX"]["price"] is None
-        assert by_ticker["NFLX"]["error"] is not None
+        assert mock_fetch.call_count == 1
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_cold_start_total_failure_returns_200_error_flagged_batch(
@@ -463,7 +467,7 @@ class TestTotalFailureServesStale:
     def test_single_ticker_endpoint_also_serves_stale_on_total_failure(
         self, mock_fetch, client
     ):
-        good = self._prime_stale()
+        good = _prime_stale()
         mock_fetch.return_value = _failed_batch()
 
         response = client.get("/api/stocks/AAPL")
@@ -475,10 +479,11 @@ class TestTotalFailureServesStale:
         assert body["is_stale"] is True
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
-    def test_partial_failure_is_still_cached_as_success(self, mock_fetch, client):
+    def test_partial_failure_is_still_stored_as_success(self, mock_fetch, client):
         # Only a *total* failure counts as "no fresh data"; a batch with
         # some good rows is a normal successful refresh and must still be
-        # cached (and must not trip the backoff).
+        # stored + stamped (and must not trip the backoff). The failed
+        # ticker is stored as an error row.
         summaries = _all_success_summaries()
         summaries["NFLX"] = _summary(
             "NFLX", is_stale=True, error="alpaca error: boom"
@@ -491,7 +496,11 @@ class TestTotalFailureServesStale:
         response = client.get("/api/stocks")
 
         assert response.status_code == 200
-        assert stocks_router.STOCKS_CACHE_KEY in stocks_router._stocks_cache._cache
+        assert _summaries_stamp() is not None
+        stored = storage.get_summaries()
+        assert len(stored) == 20
+        assert stored["NFLX"].error == "alpaca error: boom"
+        assert stored["AAPL"].error is None
         assert stocks_router._backoff.consecutive_failures == 0
 
 
@@ -500,19 +509,15 @@ class TestRateLimitBackoff:
 
     All timing is driven by the injected `fake_clock`; nothing sleeps.
     These are the regression tests for the pre-existing backoff behavior,
-    which must survive the yfinance -> alpaca client swap unchanged.
+    which must survive the move from the in-memory cache to the
+    `summaries` table unchanged.
     """
-
-    def _prime_stale(self) -> dict[str, StockSummary]:
-        good = _all_success_summaries()
-        stocks_router._stocks_cache._stale[stocks_router.STOCKS_CACHE_KEY] = good
-        return good
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_repeat_requests_during_backoff_window_do_not_hit_alpaca(
         self, mock_fetch, client, fake_clock
     ):
-        self._prime_stale()
+        _prime_stale()
         mock_fetch.return_value = _failed_batch()
 
         first = client.get("/api/stocks")
@@ -532,7 +537,7 @@ class TestRateLimitBackoff:
     def test_retry_allowed_once_backoff_window_expires(
         self, mock_fetch, client, fake_clock
     ):
-        self._prime_stale()
+        _prime_stale()
         mock_fetch.return_value = _failed_batch()
 
         client.get("/api/stocks")
@@ -548,7 +553,7 @@ class TestRateLimitBackoff:
     ):
         monkeypatch.setattr(stocks_router, "BACKOFF_BASE_SECONDS", 10.0)
         monkeypatch.setattr(stocks_router, "BACKOFF_MAX_SECONDS", 40.0)
-        self._prime_stale()
+        _prime_stale()
         mock_fetch.return_value = _failed_batch()
 
         observed = []
@@ -563,7 +568,7 @@ class TestRateLimitBackoff:
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_successful_refresh_resets_backoff(self, mock_fetch, client, fake_clock):
-        self._prime_stale()
+        _prime_stale()
         mock_fetch.return_value = _failed_batch()
         client.get("/api/stocks")
         assert stocks_router._backoff.consecutive_failures == 1
@@ -578,12 +583,13 @@ class TestRateLimitBackoff:
         assert stocks_router._backoff.blocked_until == 0.0
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
-    def test_cache_hit_during_backoff_window_does_not_reset_backoff(
+    def test_fresh_table_read_during_backoff_window_does_not_reset_backoff(
         self, mock_fetch, client, fake_clock
     ):
-        # A cached read performs no fetch, so it must not be mistaken for a
-        # successful refresh and clear an active backoff -- the TTL (90s) is
-        # shorter than the max backoff (600s), so that would defeat it.
+        # A fresh-table read performs no fetch, so it must not be mistaken
+        # for a successful refresh and clear an active backoff -- the TTL
+        # (20s) is shorter than the max backoff (600s), so that would
+        # defeat it.
         mock_fetch.return_value = _success_batch()
         client.get("/api/stocks")
         stocks_router._backoff.record_failure(_all_failed_summaries())
@@ -796,7 +802,7 @@ class TestGetStockHistory:
 
         # Simulate a process restart: all in-memory router state is gone,
         # the SQLite file is not.
-        stocks_router._history_locks = {}
+        stocks_router._refresh_locks = {}
 
         client.get("/api/stocks/AAPL/history")
         assert mock_fetch.call_count == 1, "fetch stamp must come from SQLite"

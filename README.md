@@ -5,9 +5,11 @@ NVDA, … NFLX), fed by the **Alpaca Market Data API** (free plan, IEX feed) and
 backed by a **SQLite** store so the app keeps serving the last known data when
 Alpaca is slow, rate-limited, or down.
 
-- **Backend** — Python 3.11+ / FastAPI. One batched snapshot call per ~20 s for
-  the leaderboard, in-memory TTL cache + per-key locks, exponential backoff on
-  total failure, SQLite-first history in three tiers (minute / hour / daily).
+- **Backend** — Python 3.11+ / FastAPI. SQLite-first everywhere: the
+  leaderboard is one batched snapshot call per ~20 s *per database* into a
+  20-row `summaries` table (no in-memory cache; survives restarts; single
+  flight across requests and processes via locks + a DB lease), exponential
+  backoff on total failure, history in three tiers (minute / hour / daily).
 - **Frontend** — Vite + React 18 + TypeScript, TanStack Query polling every 20 s,
   `react-router-dom`, Recharts. Three routes: leaderboard (`/`), stock detail
   (`/stock/:ticker`), placeholder dashboard (`/dashboard`). **All prices are
@@ -105,15 +107,30 @@ All endpoints are `GET`, JSON, CORS-restricted to `ALLOWED_ORIGINS`.
 
 | Endpoint | Returns | Failure behaviour |
 | --- | --- | --- |
-| `/api/stocks` | `StocksResponse` — all 20 tickers (`price`, `previous_close`, `change`, `change_percent`, `currency`, `is_stale`, `error`) | Always 200. Per-ticker failures are flagged, never fatal. On a *total* failure serves (in order) the last good in-memory batch, the newest SQLite minute rows, or the error-flagged batch — all marked `is_stale`. |
-| `/api/stocks/{ticker}` | one `StockSummary` from the same cached batch | 404 for tickers outside the fixed 20 |
+| `/api/stocks` | `StocksResponse` — all 20 tickers (`price`, `previous_close`, `change`, `change_percent`, `currency`, `is_stale`, `error`) | Always 200. DB-first: served straight from the SQLite `summaries` table (one current-state row per ticker, 20 rows, restart-safe; `change` derived on read) while its `fetch_log` stamp is within `CACHE_TTL_SECONDS`; otherwise exactly one worker refetches (in-process lock + cross-process `fetch_claims` lease) and rewrites all 20 rows atomically. Per-ticker failures are flagged, never fatal. On a *total* failure nothing is written and the table is served marked `is_stale` (cold start with an empty table: the error-flagged batch). |
+| `/api/stocks/{ticker}` | one `StockSummary` from the same table/batch | 404 for tickers outside the fixed 20 |
 | `/api/stocks/{ticker}/history?range=1d\|30d\|all` | `HistoryResponse` — `points: [{t, close}]` at minute / hourly / daily resolution. `all` is the **all-time** view: every daily bar ever stored for the ticker (the daily tier is never pruned, so it grows by one bar per trading day; the first fetch backfills `MONTH_BACKFILL_DAYS`). | SQLite is the cache: served straight from the DB while the last successful Alpaca fetch for that ticker+tier (tracked in the `fetch_log` table, restart-safe) is within the tier's freshness window; on Alpaca failure returns stored rows with `is_stale: true`; 503 only when the DB has nothing for that ticker+tier. 422 for an unknown `range`. |
 | `/api/stocks/{ticker}/stored?tier=minute\|hour\|month` | `StoredDataResponse` — raw inspection of the SQLite store: every row of `bars_<tier>` for the ticker (`ts`, `price`, parsed `analytics` = Alpaca `o/h/l/c/v/vw/n`, `recorded_at`), oldest first, plus `counts` per tier and the tier's `last_fetch_at`. | Read-only, never calls Alpaca. 404 unknown ticker, 422 unknown tier; an empty tier is `200` with `rows: []`. |
 
 `fetch_summaries` makes **one** `GET /v2/stocks/snapshots` request for the
 whole universe; history uses `GET /v2/stocks/{symbol}/bars` with pagination.
-Timestamps are normalised to `YYYY-MM-DDTHH:MM:SSZ` so string order ==
-chronological order in SQLite.
+Every request is capped at `ALPACA_TIMEOUT_SECONDS`. Timestamps are
+normalised to `YYYY-MM-DDTHH:MM:SSZ` so string order == chronological order
+in SQLite.
+
+**Leaderboard data flow.** There is no in-memory cache. A poll reads the
+`fetch_log` stamp `(summaries, *)`; inside `CACHE_TTL_SECONDS` the
+`summaries` table is returned with zero Alpaca calls. Otherwise the request
+takes the in-process `summaries` lock, re-checks (a burst of concurrent
+polls collapses into one fetch; if the leader just failed, the waiters serve
+stale instead of retrying), then claims the `(summaries, *)` row of the
+`fetch_claims` table -- a lease of `FETCH_LEASE_SECONDS` that makes several
+backend processes sharing one DB file fetch at most once per window too (a
+process that finds the lease held just serves the table). The fetched batch
+is written as 20 rows + the stamp in one transaction, monotonic on
+`fetched_at`, so a late/duplicate writer can never overwrite newer data. The
+backfill sweep runs the same refresh first on every pass, so a restarted
+backend has a populated board before any browser polls.
 
 **Backfill sweep.** Opening a chart is not the only thing that refreshes
 the bar tables: on startup, and then every `BACKFILL_INTERVAL_SECONDS`
@@ -135,8 +152,11 @@ Set `BACKFILL_ENABLED=0` to turn it off.
 | `KEY_ID` / `SECRET` | — | Alpaca credentials (see [Secrets](#secrets)) |
 | `ALPACA_DATA_BASE_URL` | `https://data.alpaca.markets` | data API host |
 | `ALPACA_FEED` | `iex` | free-plan feed |
+| `ALPACA_BARS_ADJUSTMENT` | `split` | `adjustment` sent on every bars request (`raw`\|`split`\|`dividend`\|`all`); `split` keeps history split-adjusted instead of Alpaca's as-traded `raw` default. Changing it invalidates the stored bar fetch stamps once so existing rows are refetched (snapshots unaffected) |
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | comma-separated CORS origins |
-| `CACHE_TTL_SECONDS` | `20` | leaderboard batch TTL |
+| `ALPACA_TIMEOUT_SECONDS` | `5.0` | httpx timeout for every Alpaca request |
+| `CACHE_TTL_SECONDS` | `20` | leaderboard freshness: serve the `summaries` table without calling Alpaca while its last fetch is younger than this |
+| `FETCH_LEASE_SECONDS` | `10` | cross-process fetch lease (`fetch_claims`); keep ≥ `ALPACA_TIMEOUT_SECONDS` |
 | `BACKOFF_BASE_SECONDS` / `BACKOFF_MAX_SECONDS` | `90` / `600` | exponential backoff after a total batch failure |
 | `STOCKS_DB_PATH` | `backend/data/stocks.db` | SQLite location |
 | `FRESHNESS_MINUTE_SECONDS` / `_HOUR_` / `_MONTH_` | `20` / `3600` / `86400` | per-tier "serve from DB without calling Alpaca" windows |
@@ -205,18 +225,17 @@ See `backend/app/config.py` for the full list.
 ├── .secrets.example.sh         # template -> copy to .secrets.sh (git-ignored)
 ├── docs/ptb/uk-stocks-dashboard.md   # original plan (pre-Alpaca, historical)
 ├── backend/
-│   ├── Dockerfile · pyproject.toml   # deps: fastapi, uvicorn, httpx, cachetools, pydantic
+│   ├── Dockerfile · pyproject.toml   # deps: fastapi, uvicorn, httpx, pydantic
 │   ├── app/
 │   │   ├── main.py             # FastAPI app, CORS, SQLite init + backfill task on startup
 │   │   ├── config.py           # all env-driven settings
 │   │   ├── backfill.py         # startup + periodic sweep refreshing stale (tier, ticker) pairs
 │   │   ├── tickers.py          # the fixed 20 (ticker, name, sector)
 │   │   ├── schemas.py          # pydantic response models
-│   │   ├── cache.py            # TTL cache + per-key asyncio.Lock + stale shadow
 │   │   ├── alpaca_client.py    # all Alpaca HTTP calls (httpx)
-│   │   ├── storage.py          # SQLite bars_minute / bars_hour / bars_month + fetch_log
-│   │   └── routers/stocks.py   # the three endpoints + fallback/backoff logic
-│   └── tests/                  # pytest (cache, alpaca_client, storage, router, backfill)
+│   │   ├── storage.py          # SQLite bars_* tiers + summaries + fetch_log + fetch_claims
+│   │   └── routers/stocks.py   # the endpoints + DB-first refresh / lease / backoff logic
+│   └── tests/                  # pytest (alpaca_client, storage, router, leaderboard table, backfill)
 └── frontend/
     ├── Dockerfile · package.json · vite.config.ts
     ├── tsconfig.json           # solution file -> tsconfig.app.json (src) + tsconfig.node.json (vite.config)

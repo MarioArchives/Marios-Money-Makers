@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
 
-# Cache TTLs. The summaries TTL matches the frontend's 20s poll so a poll
-# only hits Alpaca when the cached batch is older than one poll interval
-# (one bulk snapshot call per ~20s is well within the free tier's
-# 200 req/min).
+# Leaderboard freshness window: the `summaries` table (stamped in
+# `fetch_log`) is served without calling Alpaca while its last successful
+# snapshots fetch is younger than this. Matches the frontend's 20s poll so
+# a poll only hits Alpaca when the stored batch is older than one poll
+# interval (one bulk snapshot call per ~20s per database is well within
+# the free tier's 200 req/min).
 CACHE_TTL_SECONDS = float(os.environ.get("CACHE_TTL_SECONDS", "20"))
 HISTORY_CACHE_TTL_SECONDS = float(os.environ.get("HISTORY_CACHE_TTL_SECONDS", "120"))
 
@@ -30,6 +32,18 @@ ALPACA_DATA_BASE_URL = os.environ.get(
 )
 # Free-plan keys only have access to the IEX feed.
 ALPACA_FEED = os.environ.get("ALPACA_FEED", "iex")
+# `adjustment` query param sent on every bars request (raw|split|dividend|all).
+# Alpaca's own default is `raw` (as-traded prices), which draws a stock
+# split as a price cliff; `split` makes the stored history split-adjusted
+# like every consumer charting site. Not sent on the snapshots request
+# (that endpoint has no adjustment param). Read via `config.` at call time;
+# `storage.ensure_bars_adjustment` invalidates the bar `fetch_log` stamps
+# once whenever this value changes so already-stored bars get refetched.
+ALPACA_BARS_ADJUSTMENT = os.environ.get("ALPACA_BARS_ADJUSTMENT", "split")
+# Explicit httpx timeout (seconds, connect+read+write+pool) for every
+# Alpaca request. Must stay <= FETCH_LEASE_SECONDS: a fetch lease that
+# outlives a hung request is what lets another process take over.
+ALPACA_TIMEOUT_SECONDS = float(os.environ.get("ALPACA_TIMEOUT_SECONDS", "5.0"))
 
 # --- SQLite backup store ----------------------------------------------------
 # Read via `app.config.DB_PATH` at call time (never `from ... import`), so
@@ -38,6 +52,14 @@ DB_PATH = os.environ.get(
     "STOCKS_DB_PATH",
     str(Path(__file__).resolve().parent.parent / "data" / "stocks.db"),
 )
+
+# Cross-process single flight: before fetching a (tier, ticker) from Alpaca
+# a worker claims a lease row in the `fetch_claims` table; another process
+# finding a live claim serves the DB instead of fetching too. The lease is
+# normally released as soon as the fetch finishes; FETCH_LEASE_SECONDS only
+# bounds how long a crashed/hung holder blocks others, so it must be >= the
+# Alpaca HTTP timeout.
+FETCH_LEASE_SECONDS = float(os.environ.get("FETCH_LEASE_SECONDS", "10"))
 
 # Per-tier "serve straight from SQLite without calling Alpaca" windows.
 FRESHNESS_MINUTE_SECONDS = float(os.environ.get("FRESHNESS_MINUTE_SECONDS", "20"))

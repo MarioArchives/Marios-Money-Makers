@@ -7,7 +7,10 @@ through the `alpaca_client` module object, and `refresh_history` runs it
 in a worker thread, so the patch is visible there too), and a frozen
 wall clock via `app.routers.stocks._utcnow`. `app.backfill._sleep` is the
 module's sleep seam: it is replaced by a recorder so no test ever waits.
-No network.
+The sweep also refreshes the leaderboard's `summaries` table through the
+real `alpaca_client.fetch_summaries`, so an `httpx.MockTransport` answering
+the snapshots request (no minute bars, so the bar tables stay untouched)
+is installed for every test. No network.
 """
 
 from __future__ import annotations
@@ -17,12 +20,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import app.backfill as backfill
 import app.routers.stocks as stocks_router
-from app import config, storage
+from app import alpaca_client, config, storage
 from app.alpaca_client import AlpacaError, Bar
 from app.main import app
 from app.storage import TIERS
@@ -72,10 +76,30 @@ class _SleepRecorder:
             raise asyncio.CancelledError()
 
 
+def _snapshots_handler(request: httpx.Request) -> httpx.Response:
+    """Minimal good snapshots payload: prices, no minuteBar (so nothing is
+    persisted into `bars_minute` behind the history assertions' back)."""
+    if request.url.path != "/v2/stocks/snapshots":
+        return httpx.Response(404)
+    symbols = request.url.params["symbols"].split(",")
+    body = {
+        symbol: {
+            "latestTrade": {"p": 100.0 + i},
+            "prevDailyBar": {"c": 100.0},
+        }
+        for i, symbol in enumerate(symbols)
+    }
+    return httpx.Response(200, json=body)
+
+
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "stocks.db"))
-    stocks_router._history_locks = {}
+    monkeypatch.setattr(
+        alpaca_client, "_transport", httpx.MockTransport(_snapshots_handler)
+    )
+    stocks_router._refresh_locks = {}
+    stocks_router._backoff = stocks_router._BackoffState()
     storage.init_db()
     yield
 
@@ -331,8 +355,28 @@ class TestLifespanWiring:
         assert events == []
 
 
+class TestLifespanAdjustmentMigration:
+    def test_lifespan_records_adjustment_and_clears_stale_bar_stamps(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(config, "ALPACA_BARS_ADJUSTMENT", "split")
+        # Legacy DB: bars + stamps but no meta key -> fetched as `raw`.
+        storage.upsert_bars("month", "NFLX", [_bar(_iso(NOW), 1112.1)], _iso(NOW))
+        storage.record_fetch("month", "NFLX", _iso(NOW))
+        storage.record_fetch(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY, _iso(NOW))
+
+        with TestClient(app):
+            pass
+
+        assert storage.get_meta(storage.BARS_ADJUSTMENT_META_KEY) == "split"
+        assert storage.last_fetch_at("month", "NFLX") is None
+        assert storage.last_fetch_at(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY) == _iso(NOW)
+        assert len(storage.get_stored_rows("month", "NFLX")) == 1
+
+
 class TestConfigDefaults:
     def test_defaults(self):
         assert isinstance(config.BACKFILL_INTERVAL_SECONDS, float)
         assert config.BACKFILL_INTERVAL_SECONDS == 600.0
         assert config.BACKFILL_RATE_LIMIT_PAUSE_SECONDS == 60.0
+        assert config.ALPACA_BARS_ADJUSTMENT == "split"
