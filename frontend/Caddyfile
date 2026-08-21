@@ -1,0 +1,27 @@
+# Caddy config for production (frontend image, see Dockerfile `prod` stage).
+#
+# Site address comes from SITE_ADDRESS, which docker-compose.prod.yml derives
+# from DOMAIN in .env:
+#   DOMAIN empty          -> ":80"  plain HTTP on the instance IP
+#   DOMAIN=m3.example.com -> Caddy serves that host and obtains/renews a
+#                            Let's Encrypt certificate automatically
+#                            (needs DNS -> this box and ports 80 + 443 open).
+{$SITE_ADDRESS::80} {
+	root * /srv
+	encode gzip
+
+	# API -> FastAPI container on the compose network.
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Vite emits content-hashed files under /assets; cache them hard.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# SPA: unknown paths fall back to index.html for client-side routing.
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}
