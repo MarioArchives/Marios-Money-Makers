@@ -15,7 +15,12 @@ Three endpoints:
   ``"summaries"`` entry of ``_refresh_locks`` (double-checked freshness
   after acquiring) and across processes sharing the DB by a lease row in
   ``fetch_claims`` (:func:`app.storage.try_claim`, ``FETCH_LEASE_SECONDS``):
-  a process that finds the lease held simply serves the table. Net effect:
+  a process that finds the lease held simply serves the table. The claim
+  is a fencing token: ``try_claim`` hands back a ``claim_id`` and the
+  ``finally`` release passes it to :func:`app.storage.release_claim`,
+  which only deletes a row carrying that same id -- so a worker that
+  overran its lease and was superseded cannot delete the new holder's
+  claim when it eventually finishes. Net effect:
   one Alpaca snapshots call per ``CACHE_TTL_SECONDS`` window per database,
   however many requests or processes arrive, and the last good leaderboard
   survives a restart. ``change``/``change_percent`` are derived on read.
@@ -53,7 +58,8 @@ Three endpoints:
 
   ``refresh_history`` also takes the per-pair ``fetch_claims`` lease, so
   two processes sharing one DB never fetch the same pair at once either
-  (a caller that finds the lease held returns without fetching).
+  (a caller that finds the lease held returns without fetching), and
+  releases it with the same ``claim_id`` fencing token.
 
   ``all`` is the all-time view: the daily tier is never pruned, so the
   response carries *every* stored daily bar for the ticker (no time
@@ -392,7 +398,8 @@ async def refresh_history(ticker: str, tier: str) -> bool:
             return False
 
         now = _utcnow()
-        if not storage.try_claim(tier, ticker, _iso(now), config.FETCH_LEASE_SECONDS):
+        claim_id = storage.try_claim(tier, ticker, _iso(now), config.FETCH_LEASE_SECONDS)
+        if claim_id is None:
             # Another process is fetching this pair right now; its write
             # will land in the shared DB. Serve what we have.
             return False
@@ -406,7 +413,9 @@ async def refresh_history(ticker: str, tier: str) -> bool:
             storage.record_fetch(tier, ticker, _iso(_utcnow()))
             storage.prune(_utcnow())
         finally:
-            storage.release_claim(tier, ticker)
+            # Fenced by our claim_id: if we overran the lease and another
+            # worker took the claim over, this is a no-op, not a theft.
+            storage.release_claim(tier, ticker, claim_id)
         return True
 
 
@@ -617,9 +626,10 @@ async def _get_summaries_batch() -> dict[str, StockSummary]:
             return _stale_fallback()
 
         now = _utcnow()
-        if not storage.try_claim(
+        claim_id = storage.try_claim(
             SUMMARIES_TIER, SUMMARIES_KEY, _iso(now), config.FETCH_LEASE_SECONDS
-        ):
+        )
+        if claim_id is None:
             # Another process holds the lease: it is fetching into the
             # shared table right now. Serve the table as-is; it may even
             # have landed fresh since our check above.
@@ -644,7 +654,9 @@ async def _get_summaries_batch() -> dict[str, StockSummary]:
             _backoff.record_success()
             return summaries
         finally:
-            storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY)
+            # Fenced by our claim_id: a release after another process took
+            # the expired lease over is a no-op (its claim stays in place).
+            storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY, claim_id)
 
 
 async def refresh_summaries() -> None:

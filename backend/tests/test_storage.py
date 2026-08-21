@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -485,3 +486,89 @@ class TestEnsureBarsAdjustment:
         with caplog.at_level("INFO", logger="app.storage"):
             storage.ensure_bars_adjustment("split")
         assert any("bars adjustment changed" in r.getMessage() for r in caplog.records)
+
+
+class TestFetchClaimsMigration:
+    """`fetch_claims` grew a `claim_id` fencing-token column; a DB on the old
+    schema is dropped and recreated by `init_db` (claims are ephemeral),
+    exactly once, and a DB already on the new schema is left alone."""
+
+    _OLD_SCHEMA = (
+        "CREATE TABLE fetch_claims ("
+        "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
+        "PRIMARY KEY (tier, ticker))"
+    )
+
+    def _columns(self) -> list[str]:
+        with _connect() as conn:
+            return [r[1] for r in conn.execute("PRAGMA table_info(fetch_claims)")]
+
+    def _create_old_schema(self) -> None:
+        Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with _connect() as conn:
+            conn.execute(self._OLD_SCHEMA)
+            conn.execute(
+                "INSERT INTO fetch_claims (tier, ticker, claimed_at) VALUES (?, ?, ?)",
+                ("minute", "AAPL", _iso(NOW)),
+            )
+            conn.commit()
+        assert self._columns() == ["tier", "ticker", "claimed_at"]
+
+    def test_old_schema_is_recreated_with_claim_id_on_init_db(self, caplog):
+        self._create_old_schema()
+
+        with caplog.at_level("INFO", logger="app.storage"):
+            storage.init_db()
+
+        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
+        # The old (un-fenced) claim rows are gone; the table is usable.
+        with _connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM fetch_claims").fetchone()[0] == 0
+        assert any(
+            "fetch_claims" in r.getMessage() and "claim_id" in r.getMessage()
+            for r in caplog.records
+        )
+        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
+        assert isinstance(claim_id, str) and len(claim_id) == 32
+
+    def test_migration_happens_once(self, caplog):
+        self._create_old_schema()
+        storage.init_db()
+        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
+        assert claim_id is not None
+
+        with caplog.at_level("INFO", logger="app.storage"):
+            storage.init_db()  # already on the new schema: must not drop again
+
+        assert not any("dropped and recreated" in r.getMessage() for r in caplog.records)
+        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT tier, ticker, claimed_at, claim_id FROM fetch_claims"
+            ).fetchall()
+        assert rows == [("minute", "AAPL", _iso(NOW), claim_id)]
+
+    def test_new_schema_db_is_untouched(self):
+        storage.init_db()
+        claim_id = storage.try_claim("hour", "MSFT", _iso(NOW), 10)
+        assert claim_id is not None
+
+        storage.init_db()
+
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT tier, ticker, claimed_at, claim_id FROM fetch_claims"
+            ).fetchall()
+        assert rows == [("hour", "MSFT", _iso(NOW), claim_id)]
+        # And the live claim still blocks a competitor / releases with its id.
+        assert storage.try_claim("hour", "MSFT", _iso(NOW), 10) is None
+        assert storage.release_claim("hour", "MSFT", claim_id) is True
+
+    def test_try_claim_also_migrates_an_old_table_defensively(self):
+        # `try_claim` runs the same ensure step (no prior init_db).
+        self._create_old_schema()
+
+        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
+
+        assert isinstance(claim_id, str) and len(claim_id) == 32
+        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]

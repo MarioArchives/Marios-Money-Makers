@@ -59,3 +59,9 @@ app.add_middleware(
 )
 
 app.include_router(stocks_router)
+
+
+@app.get("/api/health", tags=["ops"])
+def health() -> dict[str, str]:
+    """Liveness probe for Docker healthchecks / deploy scripts (no I/O)."""
+    return {"status": "ok"}

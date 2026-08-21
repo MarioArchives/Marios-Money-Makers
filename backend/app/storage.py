@@ -77,8 +77,20 @@ window. The claim is deleted as soon as the fetch finishes.
         tier       TEXT NOT NULL,
         ticker     TEXT NOT NULL,
         claimed_at TEXT NOT NULL,   -- ISO-8601 UTC
+        claim_id   TEXT NOT NULL,   -- fencing token, uuid4 hex
         PRIMARY KEY (tier, ticker)
     );
+
+``claim_id`` is a *fencing token*: every successful ``try_claim`` mints a
+fresh ``uuid4().hex`` and stores it on the row (a takeover of an expired
+claim replaces it), and ``release_claim`` deletes the row only when the
+caller's id still matches. Without it a worker that stalled past its
+lease -- so that another worker took the claim over -- would, on
+finishing, delete the *new* holder's claim and let a third worker fetch
+concurrently. With it, a release carrying a superseded id is a silent
+no-op. The column is ``NOT NULL``; a DB whose ``fetch_claims`` predates
+it is simply dropped and recreated by ``init_db`` (claims are ephemeral,
+so nothing of value is lost).
 
 A seventh table, ``meta``, is a tiny key/value store for DB-level
 bookkeeping (``get_meta`` / ``set_meta``):
@@ -126,6 +138,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3  # noqa: F401 - used by the implementation
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -216,9 +229,12 @@ _CREATE_FETCH_CLAIMS_SQL = (
     "tier TEXT NOT NULL, "
     "ticker TEXT NOT NULL, "
     "claimed_at TEXT NOT NULL, "
+    "claim_id TEXT NOT NULL, "
     "PRIMARY KEY (tier, ticker)"
     ")"
 )
+# The column whose absence marks a pre-fencing-token `fetch_claims` table.
+_FETCH_CLAIMS_TOKEN_COLUMN = "claim_id"
 
 
 META_TABLE = "meta"
@@ -242,11 +258,39 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_fetch_claims_table(conn: sqlite3.Connection) -> None:
+    """Create ``fetch_claims`` on the current schema, migrating an old one.
+
+    A DB written before the ``claim_id`` fencing token existed has a
+    ``fetch_claims`` table without that column. Because claims are
+    ephemeral (a row only ever lives for one fetch / one lease window),
+    the correct migration is to drop the old table and recreate it --
+    detected via ``PRAGMA table_info(fetch_claims)``, done once, and a
+    no-op on every later call (the column is then present). Does not
+    commit; the caller does.
+    """
+    columns = {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({FETCH_CLAIMS_TABLE})").fetchall()
+    }
+    if columns and _FETCH_CLAIMS_TOKEN_COLUMN not in columns:
+        conn.execute(f"DROP TABLE IF EXISTS {FETCH_CLAIMS_TABLE}")
+        logger.info(
+            "storage: %s table predates the %r fencing token column; "
+            "dropped and recreated it (claims are ephemeral)",
+            FETCH_CLAIMS_TABLE,
+            _FETCH_CLAIMS_TOKEN_COLUMN,
+        )
+    conn.execute(_CREATE_FETCH_CLAIMS_SQL)
+
+
 def init_db() -> None:
     """Create the DB file's parent directory and every table.
 
     Idempotent (``CREATE TABLE IF NOT EXISTS``); called from the app's
-    lifespan hook and defensively before writes.
+    lifespan hook and defensively before writes. The one schema migration
+    it performs is ``fetch_claims`` (see :func:`_ensure_fetch_claims_table`):
+    a pre-``claim_id`` table is dropped and recreated, once.
     """
     Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
@@ -254,7 +298,7 @@ def init_db() -> None:
             conn.execute(_create_table_sql(_table(tier)))
         conn.execute(_CREATE_FETCH_LOG_SQL)
         conn.execute(_CREATE_SUMMARIES_SQL)
-        conn.execute(_CREATE_FETCH_CLAIMS_SQL)
+        _ensure_fetch_claims_table(conn)
         conn.execute(_CREATE_META_SQL)
         conn.commit()
 
@@ -612,42 +656,62 @@ def _minus_seconds(ts: str, seconds: float) -> str:
     return (dt - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def try_claim(tier: str, ticker: str, now_iso: str, lease_seconds: float) -> bool:
-    """Try to take the fetch lease for ``(tier, ticker)``; True if we hold it.
+def try_claim(tier: str, ticker: str, now_iso: str, lease_seconds: float) -> str | None:
+    """Try to take the fetch lease for ``(tier, ticker)``.
+
+    Returns the new claim's ``claim_id`` (a fresh ``uuid4().hex`` minted
+    here -- the fencing token to hand back to :func:`release_claim`) when
+    the claim is acquired, ``None`` when a live claim held by anyone
+    (including a previous call of our own) blocks it.
 
     A single upsert: insert the claim, or -- if one exists -- take it over
     only when it is older than ``lease_seconds`` (``claimed_at <
-    now - lease``). Returns ``rowcount == 1``, i.e. whether *this* call
-    inserted or refreshed the row. A live claim held by anyone (including a
-    previous call of our own) yields ``False``.
+    now - lease``), replacing both ``claimed_at`` and ``claim_id``. The
+    claim is ours iff ``rowcount == 1``, i.e. *this* call inserted or
+    refreshed the row.
     """
     _validate_fetch_tier(tier)
     Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     expired_before = _minus_seconds(now_iso, lease_seconds)
+    claim_id = uuid.uuid4().hex
     with _connect() as conn:
-        conn.execute(_CREATE_FETCH_CLAIMS_SQL)
+        _ensure_fetch_claims_table(conn)
         cursor = conn.execute(
-            f"INSERT INTO {FETCH_CLAIMS_TABLE} (tier, ticker, claimed_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(tier, ticker) DO UPDATE SET claimed_at=excluded.claimed_at "
+            f"INSERT INTO {FETCH_CLAIMS_TABLE} (tier, ticker, claimed_at, claim_id) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(tier, ticker) DO UPDATE SET "
+            "claimed_at=excluded.claimed_at, "
+            "claim_id=excluded.claim_id "
             f"WHERE {FETCH_CLAIMS_TABLE}.claimed_at < ?",
-            (tier, ticker, now_iso, expired_before),
+            (tier, ticker, now_iso, claim_id, expired_before),
         )
         claimed = cursor.rowcount == 1
         conn.commit()
-    return claimed
+    return claim_id if claimed else None
 
 
-def release_claim(tier: str, ticker: str) -> None:
-    """Drop the fetch lease for ``(tier, ticker)`` (no-op if absent)."""
+def release_claim(tier: str, ticker: str, claim_id: str) -> bool:
+    """Drop the fetch lease for ``(tier, ticker)`` if it is still ours.
+
+    Deletes the row only when its ``claim_id`` equals the one returned by
+    the :func:`try_claim` that acquired it. Returns ``True`` iff a row was
+    deleted. A stale or unknown id -- our lease expired and another worker
+    took the claim over, or it was never ours -- is a silent no-op that
+    returns ``False``: a release must never remove someone else's claim.
+    ``claim_id`` is required so no caller can delete by key alone.
+    """
     _validate_fetch_tier(tier)
     if not os.path.exists(config.DB_PATH):
-        return
+        return False
     try:
         with _connect() as conn:
-            conn.execute(
-                f"DELETE FROM {FETCH_CLAIMS_TABLE} WHERE tier = ? AND ticker = ?",
-                (tier, ticker),
+            cursor = conn.execute(
+                f"DELETE FROM {FETCH_CLAIMS_TABLE} "
+                "WHERE tier = ? AND ticker = ? AND claim_id = ?",
+                (tier, ticker, claim_id),
             )
+            released = cursor.rowcount == 1
             conn.commit()
+        return released
     except sqlite3.OperationalError:
-        return
+        return False

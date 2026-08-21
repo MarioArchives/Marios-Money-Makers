@@ -126,7 +126,9 @@ polls collapses into one fetch; if the leader just failed, the waiters serve
 stale instead of retrying), then claims the `(summaries, *)` row of the
 `fetch_claims` table -- a lease of `FETCH_LEASE_SECONDS` that makes several
 backend processes sharing one DB file fetch at most once per window too (a
-process that finds the lease held just serves the table). The fetched batch
+process that finds the lease held just serves the table). The claim carries a
+`claim_id` fencing token, so a worker that overran its lease and was taken
+over cannot delete the new holder's claim when it releases. The fetched batch
 is written as 20 rows + the stamp in one transaction, monotonic on
 `fetched_at`, so a late/duplicate writer can never overwrite newer data. The
 backfill sweep runs the same refresh first on every pass, so a restarted

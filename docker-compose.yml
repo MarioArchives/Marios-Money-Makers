@@ -1,6 +1,8 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      target: dev
     ports:
       - "8000:8000"
     environment:
@@ -15,7 +17,9 @@ services:
       - stocks-data:/app/data
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: dev
     ports:
       - "5173:5173"
     environment:

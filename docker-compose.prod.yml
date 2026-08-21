@@ -1,0 +1,53 @@
+# Production stack for a single box (see AWS-DEPLOY.md).
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Secrets/config come from a `.env` file next to this file (copy
+# .env.example, chmod 600, never commit). Only Caddy is published to the
+# host; the backend is reachable solely through Caddy's /api proxy.
+services:
+  backend:
+    build:
+      context: ./backend
+      target: prod
+    image: m3-backend
+    env_file: .env            # KEY_ID, SECRET (Alpaca), optional overrides
+    environment:
+      # Same-origin via Caddy, so CORS is moot; kept for non-proxied setups.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost}
+    volumes:
+      - stocks-data:/app/data   # SQLite cache survives rebuilds/restarts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        VITE_API_BASE_URL: ""   # same origin (Caddy proxies /api)
+    image: m3-frontend
+    ports:
+      - "80:80"
+      - "443:443"               # unused until DOMAIN is set (harmless otherwise)
+    environment:
+      # DOMAIN unset/empty -> ":80" (plain HTTP); otherwise Caddy serves the
+      # host name with automatic HTTPS. (Caddy itself treats an empty env var
+      # as set, so the defaulting has to happen here, not in the Caddyfile.)
+      SITE_ADDRESS: ${DOMAIN:-:80}
+    volumes:
+      - caddy-data:/data        # TLS certificates (when DOMAIN is set)
+      - caddy-config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  stocks-data:
+  caddy-data:
+  caddy-config:
