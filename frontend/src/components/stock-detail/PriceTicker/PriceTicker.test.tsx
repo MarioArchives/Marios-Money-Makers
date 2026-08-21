@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PriceTicker } from './PriceTicker'
 import type { PriceTickerProps } from './PriceTicker.props'
 import type { HistoryResponse, StockSummary } from '../../../api/types'
+import { FxRateContext } from '../../../providers/FxRateProvider/FxRateProvider'
 
 /**
  * `queries.ts` is mocked below. Real `useQuery` re-renders only the
@@ -86,7 +87,7 @@ const summary: StockSummary = {
   name: 'AstraZeneca',
   sector: 'Pharma',
   price: 112.34,
-  currency: 'GBP',
+  currency: 'USD',
   previous_close: 110.0,
   change: 2.34,
   change_percent: 2.13,
@@ -113,6 +114,15 @@ describe('PriceTicker rendering', () => {
     render(<PriceTicker ticker="AZN.L" />)
 
     expect(screen.getByTestId('price-ticker').textContent).toContain('112.34')
+  })
+
+  it('formats the price in the currency the API reports', () => {
+    render(<PriceTicker ticker="AZN.L" />)
+    expect(screen.getByTestId('price-ticker').textContent).toContain('$112.34')
+
+    ;(detailStore as ReactiveStore<StockSummary>).set({ ...summary, currency: 'GBP' })
+    render(<PriceTicker ticker="AZN.L" />)
+    expect(screen.getAllByTestId('price-ticker').at(-1)?.textContent).toContain('£112.34')
   })
 })
 
@@ -222,5 +232,19 @@ describe('PriceTicker degraded state', () => {
     render(<PriceTicker ticker="AZN.L" />)
 
     expect(screen.getByTestId('price-ticker').textContent).toContain('—')
+  })
+})
+
+describe('PriceTicker GBP display', () => {
+  it('shows the price converted to GBP when the shared FX rate is available', () => {
+    const rate = { base: 'USD', quote: 'GBP', rate: 0.5, date: '2026-08-20', source: 'ECB' } as const
+    render(
+      <FxRateContext.Provider value={{ status: 'ready', rate }}>
+        <PriceTicker ticker="AZN.L" />
+      </FxRateContext.Provider>,
+    )
+
+    expect(screen.getByTestId('price-ticker').textContent).toContain('£56.17')
+    expect(screen.getByTestId('price-ticker').textContent).not.toContain('$')
   })
 })

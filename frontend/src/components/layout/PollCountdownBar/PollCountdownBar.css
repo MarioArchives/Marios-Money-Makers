@@ -1,0 +1,43 @@
+/* The header's bottom border, as a countdown: a faint brass track with the
+   full-strength brass line on top, scaled from the left by the fraction of
+   the poll interval still to run. Positioned by the header (absolute,
+   bottom edge). */
+.poll-countdown {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  overflow: hidden;
+}
+
+.poll-countdown__fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--color-accent);
+  transform-origin: left center;
+  transition: transform 250ms linear;
+  will-change: transform;
+}
+
+/* In flight: the line breathes until fresh data lands and it refills. */
+.poll-countdown.is-fetching .poll-countdown__fill {
+  animation: poll-countdown-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes poll-countdown-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .poll-countdown__fill {
+    transition: none;
+    animation: none;
+  }
+}

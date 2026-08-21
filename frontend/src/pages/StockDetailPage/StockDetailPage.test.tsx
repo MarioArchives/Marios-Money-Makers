@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UseQueryResult } from '@tanstack/react-query'
@@ -27,12 +27,18 @@ vi.mock('../../components/stock-detail/PriceTicker/PriceTicker', () => ({
 }))
 
 vi.mock('../../components/stock-detail/StockChart/StockChart', () => ({
-  StockChart: (props: { ticker: string }) => <div data-testid="stock-chart">{props.ticker}</div>,
+  StockChart: (props: { ticker: string; range: string }) => (
+    <div data-testid="stock-chart" data-range={props.range}>
+      {props.ticker}
+    </div>
+  ),
 }))
 
 vi.mock('../../components/stock-detail/RawDataTable/RawDataTable', () => ({
-  RawDataTable: (props: { ticker: string }) => (
-    <div data-testid="raw-data-table">{props.ticker}</div>
+  RawDataTable: (props: { ticker: string; range: string }) => (
+    <div data-testid="raw-data-table" data-range={props.range}>
+      {props.ticker}
+    </div>
   ),
 }))
 
@@ -124,6 +130,30 @@ describe('StockDetailPage', () => {
     const table = screen.getByTestId('raw-data-table')
     expect(table).toHaveTextContent('AZN.L')
     expect(chart.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('defaults the history range to 1d and passes it to chart and table', () => {
+    renderAtRoute('/stock/AZN.L')
+
+    expect(screen.getByTestId('stock-chart')).toHaveAttribute('data-range', '1d')
+    expect(screen.getByTestId('raw-data-table')).toHaveAttribute('data-range', '1d')
+  })
+
+  it('reads the history range from the URL and passes the same value to chart and table', () => {
+    renderAtRoute('/stock/AZN.L?range=30d')
+
+    expect(screen.getByTestId('stock-chart')).toHaveAttribute('data-range', '30d')
+    expect(screen.getByTestId('raw-data-table')).toHaveAttribute('data-range', '30d')
+  })
+
+  it('renders the range selector and switches both chart and table when a range is picked', () => {
+    renderAtRoute('/stock/AZN.L')
+
+    expect(screen.getByTestId('range-selector')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'ALL' }))
+
+    expect(screen.getByTestId('stock-chart')).toHaveAttribute('data-range', 'all')
+    expect(screen.getByTestId('raw-data-table')).toHaveAttribute('data-range', 'all')
   })
 
   it('does not render the communication-loss message while the query is healthy', () => {

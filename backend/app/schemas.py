@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -6,7 +8,7 @@ class StockSummary(BaseModel):
     name: str
     sector: str
     price: float | None
-    currency: str = "GBP"
+    currency: str = "USD"
     previous_close: float | None
     change: float | None
     change_percent: float | None
@@ -31,3 +33,26 @@ class HistoryResponse(BaseModel):
     points: list[HistoryPoint]
     is_stale: bool
     error: str | None = None
+
+
+class StoredBar(BaseModel):
+    """One row of a ``bars_<tier>`` table, exactly as stored."""
+
+    ts: str
+    price: float
+    analytics: dict[str, Any]
+    recorded_at: str
+
+
+class StoredDataResponse(BaseModel):
+    """Everything the SQLite store holds for one ticker in one tier."""
+
+    ticker: str
+    tier: str
+    table: str
+    # Stored bars are Alpaca US-equity prices; surfaced so the UI can
+    # convert without assuming.
+    currency: str = "USD"
+    last_fetch_at: str | None
+    counts: dict[str, int]
+    rows: list[StoredBar]

@@ -1,7 +1,13 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { useQueryClient } from '@tanstack/react-query'
 import { AppProviders } from './AppProviders'
+
+// AppProviders mounts FxRateProvider, whose query would otherwise call the
+// real FX endpoint from inside these tests.
+vi.mock('../../api/fx', () => ({
+  useUsdGbpRateQuery: vi.fn(() => ({ data: undefined, isError: false })),
+}))
 
 /** Reads the QueryClient out of context to prove it was actually provided. */
 function QueryClientProbe(): JSX.Element {

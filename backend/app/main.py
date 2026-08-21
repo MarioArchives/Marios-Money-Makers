@@ -2,20 +2,51 @@
 
 Creates the `FastAPI` app, configures CORS from
 `app.config.ALLOWED_ORIGINS` (GET-only, per the plan's error-handling
-section), and wires up the stocks router. This module is plumbing (app
-construction + middleware configuration), not business logic, so unlike
-`routers/stocks.py` it is fully implemented rather than a skeleton.
+section), and wires up the stocks router. The lifespan hook initialises
+the SQLite store and, unless `app.config.BACKFILL_ENABLED` is off, runs
+the :mod:`app.backfill` sweep as a background task for the life of the
+process (cancelled on shutdown). This module is plumbing (app
+construction + middleware configuration), not business logic.
 """
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import backfill, config, storage
 from app.config import ALLOWED_ORIGINS
 from app.routers.stocks import router as stocks_router
 
-app = FastAPI(title="UK Stocks Dashboard API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Create the SQLite tables, then run the backfill sweep until shutdown.
+
+    ``config.BACKFILL_ENABLED`` is read at call time (module attribute,
+    not imported) so tests can monkeypatch it off and use ``TestClient``
+    lifespans without starting a real sweep.
+    """
+    storage.init_db()
+    task: asyncio.Task[None] | None = None
+    if config.BACKFILL_ENABLED:
+        task = asyncio.create_task(backfill.run_forever(), name="backfill")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="Mario's Money Makers API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -5,6 +5,7 @@ import type { UseQueryResult } from '@tanstack/react-query'
 import { StockChart } from './StockChart'
 import { useStockHistoryQuery } from '../../../api/queries'
 import type { HistoryPoint, HistoryResponse } from '../../../api/types'
+import { FxRateContext } from '../../../providers/FxRateProvider/FxRateProvider'
 
 vi.mock('../../../api/queries', () => ({
   useStockHistoryQuery: vi.fn(),
@@ -186,6 +187,45 @@ describe('StockChart mount stability across polls', () => {
   })
 })
 
+describe('StockChart range handling', () => {
+  it('requests the intraday range by default and forwards an explicit range to the history query', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildHistoryResult([{ t: '2026-08-19T12:00:00Z', close: 100 }]),
+    )
+    const { rerender } = render(<StockChart ticker="AZN.L" />)
+    expect(mockedUseStockHistoryQuery).toHaveBeenLastCalledWith('AZN.L', '1d')
+
+    rerender(<StockChart ticker="AZN.L" range="30d" />)
+    expect(mockedUseStockHistoryQuery).toHaveBeenLastCalledWith('AZN.L', '30d')
+  })
+
+  it('replaces the accumulated series (instead of appending) when the range changes', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildHistoryResult([
+        { t: '2026-08-19T12:00:00Z', close: 100 },
+        { t: '2026-08-19T12:05:00Z', close: 101 },
+      ]),
+    )
+    const { rerender } = render(<StockChart ticker="AZN.L" range="1d" />)
+
+    const monthly = [
+      { t: '2026-07-20T00:00:00Z', close: 90 },
+      { t: '2026-08-19T00:00:00Z', close: 99 },
+    ]
+    mockedUseStockHistoryQuery.mockReturnValue(buildHistoryResult(monthly))
+    rerender(<StockChart ticker="AZN.L" range="30d" />)
+
+    expect(getRenderedPoints()).toEqual(monthly)
+  })
+
+  it('titles the card after the selected range', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildHistoryResult([]))
+    render(<StockChart ticker="AZN.L" range="all" />)
+
+    expect(screen.getByTestId('stock-chart').textContent).toContain('all time')
+  })
+})
+
 describe('StockChart recharts wiring', () => {
   it('renders the recharts Line with isAnimationActive disabled', () => {
     mockedUseStockHistoryQuery.mockReturnValue(
@@ -257,6 +297,39 @@ describe('StockChart degraded state', () => {
     rerender(<StockChart ticker="AZN.L" />)
 
     expect(screen.getByTestId('stock-chart').classList.contains('is-stale')).toBe(true)
+    expect(getRenderedPoints()).toEqual([{ t: '2026-08-19T12:00:00Z', close: 100 }])
+  })
+})
+
+describe('StockChart GBP conversion', () => {
+  it('plots closes converted to GBP at the shared FX rate, leaving timestamps alone', () => {
+    const rate = { base: 'USD', quote: 'GBP', rate: 0.5, date: '2026-08-20', source: 'ECB' } as const
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildHistoryResult([
+        { t: '2026-08-19T12:00:00Z', close: 100 },
+        { t: '2026-08-19T12:05:00Z', close: 101 },
+      ]),
+    )
+
+    render(
+      <FxRateContext.Provider value={{ status: 'ready', rate }}>
+        <StockChart ticker="AZN.L" />
+      </FxRateContext.Provider>,
+    )
+
+    expect(getRenderedPoints()).toEqual([
+      { t: '2026-08-19T12:00:00Z', close: 50 },
+      { t: '2026-08-19T12:05:00Z', close: 50.5 },
+    ])
+  })
+
+  it('plots the native figures while no rate is available', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildHistoryResult([{ t: '2026-08-19T12:00:00Z', close: 100 }]),
+    )
+
+    render(<StockChart ticker="AZN.L" />)
+
     expect(getRenderedPoints()).toEqual([{ t: '2026-08-19T12:00:00Z', close: 100 }])
   })
 })

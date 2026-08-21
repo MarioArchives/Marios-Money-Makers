@@ -80,3 +80,12 @@ describe('AppShell', () => {
     expect(screen.queryByText('leaderboard-outlet-content')).not.toBeInTheDocument()
   })
 })
+
+describe('AppShell poll countdown border', () => {
+  it('renders the poll countdown bar inside the header bar', () => {
+    renderShellAtRoute('/')
+
+    const bar = screen.getByRole('progressbar', { name: /next data refresh/i })
+    expect(screen.getByRole('banner')).toContainElement(bar)
+  })
+})

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { PollCountdownBar } from "../PollCountdownBar/PollCountdownBar";
 import "./AppShell.css";
 
 const CONDENSE_SCROLL_Y = 24;
@@ -8,7 +9,9 @@ const CONDENSE_SCROLL_Y = 24;
  * Top-level layout route. Header bar: left menu slot, centred masthead
  * title, M-cubed mark on the right. The bar is sticky; once the page is
  * scrolled it condenses — the title fades out and the mark takes the
- * centre. Pure plumbing/layout — no data fetching or business logic.
+ * centre. The bar's bottom border is the `PollCountdownBar` (time until
+ * the next data poll). Pure plumbing/layout — no data fetching or business
+ * logic of its own.
  */
 export function AppShell(): JSX.Element {
   const [condensed, setCondensed] = useState(false);
@@ -55,6 +58,7 @@ export function AppShell(): JSX.Element {
         >
           M<sup className="app-shell__logo-sup">3</sup>
         </span>
+        <PollCountdownBar />
       </header>
       <main className="app-shell__content">
         <Outlet />

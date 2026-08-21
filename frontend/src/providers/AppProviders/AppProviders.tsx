@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { AppProvidersProps } from './AppProviders.props'
+import { FxRateProvider } from '../FxRateProvider/FxRateProvider'
 import './AppProviders.css'
 
 /**
@@ -25,7 +26,8 @@ function createQueryClient(): QueryClient {
 
 /**
  * The single, slim, root-level global provider for the app. Composes
- * cross-cutting concerns — currently just `QueryClientProvider` — around
+ * cross-cutting concerns — `QueryClientProvider`, then `FxRateProvider`
+ * (the shared USD->GBP rate, which needs the query client) — around
  * `children`. Kept minimal by design: new cross-cutting concerns should be
  * added here rather than as additional ad hoc providers scattered around
  * the tree.
@@ -33,5 +35,9 @@ function createQueryClient(): QueryClient {
 export function AppProviders({ children }: AppProvidersProps): JSX.Element {
   const [queryClient] = useState(createQueryClient)
 
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  return (
+    <QueryClientProvider client={queryClient}>
+      <FxRateProvider>{children}</FxRateProvider>
+    </QueryClientProvider>
+  )
 }

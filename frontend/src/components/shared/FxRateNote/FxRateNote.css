@@ -1,0 +1,11 @@
+.fx-rate-note {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+.fx-rate-note.is-unavailable {
+  font-style: italic;
+}

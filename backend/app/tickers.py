@@ -8,27 +8,29 @@ class TickerInfo:
     sector: str
 
 
+# Fixed universe of 20 US large caps, Alpaca symbol format (note BRK.B's
+# dot -- that is how Alpaca spells Berkshire's class-B shares).
 TICKERS: list[TickerInfo] = [
-    TickerInfo("AZN.L", "AstraZeneca", "Pharmaceuticals"),
-    TickerInfo("GSK.L", "GSK", "Pharmaceuticals"),
-    TickerInfo("ULVR.L", "Unilever", "Consumer Goods"),
-    TickerInfo("RKT.L", "Reckitt Benckiser", "Consumer Goods"),
-    TickerInfo("DGE.L", "Diageo", "Beverages"),
-    TickerInfo("BATS.L", "British American Tobacco", "Tobacco"),
-    TickerInfo("SHEL.L", "Shell", "Energy"),
-    TickerInfo("BP.L", "BP", "Energy"),
-    TickerInfo("RIO.L", "Rio Tinto", "Mining"),
-    TickerInfo("GLEN.L", "Glencore", "Mining"),
-    TickerInfo("HSBA.L", "HSBC", "Banking"),
-    TickerInfo("BARC.L", "Barclays", "Banking"),
-    TickerInfo("LLOY.L", "Lloyds Banking Group", "Banking"),
-    TickerInfo("PRU.L", "Prudential", "Insurance"),
-    TickerInfo("AV.L", "Aviva", "Insurance"),
-    TickerInfo("VOD.L", "Vodafone Group", "Telecom"),
-    TickerInfo("BT-A.L", "BT Group", "Telecom"),
-    TickerInfo("TSCO.L", "Tesco", "Retail"),
-    TickerInfo("NG.L", "National Grid", "Utilities"),
-    TickerInfo("RR.L", "Rolls-Royce Holdings", "Aerospace"),
+    TickerInfo("AAPL", "Apple", "Technology"),
+    TickerInfo("MSFT", "Microsoft", "Technology"),
+    TickerInfo("NVDA", "NVIDIA", "Semiconductors"),
+    TickerInfo("GOOGL", "Alphabet", "Technology"),
+    TickerInfo("AMZN", "Amazon", "Consumer Discretionary"),
+    TickerInfo("META", "Meta Platforms", "Technology"),
+    TickerInfo("TSLA", "Tesla", "Automotive"),
+    TickerInfo("AVGO", "Broadcom", "Semiconductors"),
+    TickerInfo("BRK.B", "Berkshire Hathaway", "Financials"),
+    TickerInfo("JPM", "JPMorgan Chase", "Banking"),
+    TickerInfo("V", "Visa", "Financial Services"),
+    TickerInfo("LLY", "Eli Lilly", "Pharmaceuticals"),
+    TickerInfo("UNH", "UnitedHealth Group", "Healthcare"),
+    TickerInfo("XOM", "Exxon Mobil", "Energy"),
+    TickerInfo("MA", "Mastercard", "Financial Services"),
+    TickerInfo("HD", "Home Depot", "Retail"),
+    TickerInfo("PG", "Procter & Gamble", "Consumer Goods"),
+    TickerInfo("COST", "Costco", "Retail"),
+    TickerInfo("JNJ", "Johnson & Johnson", "Pharmaceuticals"),
+    TickerInfo("NFLX", "Netflix", "Media"),
 ]
 
 TICKER_SYMBOLS: list[str] = [t.ticker for t in TICKERS]

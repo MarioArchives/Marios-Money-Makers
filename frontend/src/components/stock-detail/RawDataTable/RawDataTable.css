@@ -8,9 +8,77 @@
 
 .raw-data-table__head {
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.raw-data-table__title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.raw-data-table__meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Tier switch: same pill treatment as the page's range selector. */
+.raw-data-table__tiers {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+}
+
+.raw-data-table__tier {
+  appearance: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  line-height: 1.6;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
+}
+
+.raw-data-table__tier:hover {
+  color: var(--color-text);
+}
+
+.raw-data-table__tier:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.raw-data-table__tier.is-selected {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-card);
+}
+
+.raw-data-table__tier-count {
+  font-size: var(--text-2xs);
+  color: var(--color-text-faint);
 }
 
 /* The list can run long; it scrolls inside the card rather than pushing
@@ -39,11 +107,21 @@
   letter-spacing: var(--tracking-wider);
   color: var(--color-text-faint);
   text-align: left;
+  white-space: nowrap;
   padding: var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--color-border);
 }
 
-.raw-data-table__table th:last-child {
+/* Unit suffix in each column header ("Price (USD)"): same small caps as
+   the label, but quieter and not bold so the label still leads. */
+.raw-data-table__unit {
+  font-weight: 400;
+  color: var(--color-text-faint);
+  opacity: 0.8;
+}
+
+.raw-data-table__table th.raw-data-table__num,
+.raw-data-table__table td.raw-data-table__num {
   text-align: right;
 }
 
@@ -55,7 +133,6 @@
 }
 
 .raw-data-table__close {
-  text-align: right;
   color: var(--color-text);
 }
 

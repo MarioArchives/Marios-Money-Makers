@@ -14,6 +14,13 @@
   padding: var(--space-5);
 }
 
+.stock-detail-page__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-4);
+}
+
 /* Whole-backend failure greys the page's data surfaces once. The banner
    itself stays at full strength — it is the one thing still speaking. */
 .stock-detail-page.is-disconnected > .card,

@@ -4,15 +4,14 @@ import type { StockRowProps } from './StockRow.props'
 import { CompanyIcon } from '../../shared/CompanyIcon/CompanyIcon'
 import { ChangeIndicator } from '../../shared/ChangeIndicator/ChangeIndicator'
 import { ErrorBadge } from '../../shared/ErrorBadge/ErrorBadge'
+import { RankDeltaChip } from '../RankDeltaChip/RankDeltaChip'
+import { useFxRate } from '../../../providers/FxRateProvider/FxRateProvider'
+import { formatDisplayPrice } from '../../../utils/currency'
+import type { FxRate } from '../../../api/types'
 import './StockRow.css'
 
-const gbpFormatter = new Intl.NumberFormat('en-GB', {
-  style: 'currency',
-  currency: 'GBP',
-})
-
-function formatPrice(price: number | null): string {
-  return price === null ? '—' : gbpFormatter.format(price)
+function formatPrice(price: number | null, currency: string, rate: FxRate | null): string {
+  return price === null ? '—' : formatDisplayPrice(price, currency, rate)
 }
 
 function directionClass(changePercent: number | null): 'up' | 'down' | 'flat' {
@@ -33,11 +32,20 @@ function directionClass(changePercent: number | null): 'up' | 'down' | 'flat' {
  * neutral, and a single muted dot marks the row. No error text: a
  * rate-limited upstream feed is not something the reader can act on.
  *
+ * Prices are displayed in GBP, converted at the shared `FxRateProvider`
+ * rate (`formatDisplayPrice`); until a rate is available the native
+ * figure shows instead, so the board never goes blank.
+ *
+ * `rankDelta` (set briefly by `StockTable` after a re-rank) adds a small
+ * `▲n`/`▼n` chip after the ticker.
+ *
  * Wrapped in `React.memo` so unchanged rows (same `stock` object reference,
- * per the leaderboard's structural-sharing query data) skip re-rendering
- * when the parent `StockTable`/`LeaderboardPage` re-renders.
+ * per the leaderboard's structural-sharing query data, and no rank-delta
+ * change) skip re-rendering when the parent `StockTable`/`LeaderboardPage`
+ * re-renders.
  */
-function StockRowComponent({ stock }: StockRowProps): JSX.Element {
+function StockRowComponent({ stock, rankDelta }: StockRowProps): JSX.Element {
+  const { rate } = useFxRate()
   const isDegraded = stock.is_stale || Boolean(stock.error)
   const className = [
     'stock-row',
@@ -53,10 +61,15 @@ function StockRowComponent({ stock }: StockRowProps): JSX.Element {
         <CompanyIcon ticker={stock.ticker} name={stock.name} size={30} />
         <div className="stock-row__name-text">
           <div className="stock-row__company">{stock.name}</div>
-          <div className="stock-row__ticker">{stock.ticker}</div>
+          <div className="stock-row__ticker">
+            {stock.ticker}
+            <RankDeltaChip delta={rankDelta} />
+          </div>
         </div>
       </div>
-      <div className="stock-row__price numeral">{formatPrice(stock.price)}</div>
+      <div className="stock-row__price numeral">
+        {formatPrice(stock.price, stock.currency, rate)}
+      </div>
       <div className="stock-row__stats">
         <ChangeIndicator changePercent={stock.change_percent} />
         <ErrorBadge isStale={stock.is_stale} error={stock.error} />

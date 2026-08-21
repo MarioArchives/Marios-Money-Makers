@@ -61,7 +61,7 @@
   --text-sm: 0.8125rem;
   --text-base: 0.9375rem;
   --text-md: 1.0625rem;
-  --text-lg: 1.375rem;
+  --text-lg: 1.3rem;
   --text-xl: 1.875rem;
   --text-2xl: 2.5rem;
 
@@ -95,18 +95,26 @@
 
   --motion-fast: 120ms;
   --motion-base: 1000ms;
+  /* Leaderboard re-rank slide (FLIP) and its springy curve; see StockTable.
+     The slide plus its ≤96 ms rank stagger lands inside ~650 ms. */
+  --motion-reorder: 540ms;
+  --ease-spring: cubic-bezier(0.3, 1.18, 0.45, 1);
+  /* Lifetime of the ▲n/▼n rank-delta chip (RankDeltaChip / StockTable). */
+  --motion-rank-delta: 2200ms;
   --ease: cubic-bezier(0.2, 0.6, 0.3, 1);
 
   color-scheme: light;
   font-family: var(--font-body);
-  --headder-font: "Safina Bralyn", cursive;
+  --header-font: "Acthirey", Georgia, "Times New Roman", serif;
 }
 
+/* Header masthead face: Acthirey (Roomspace Creative Lab) — demo build,
+   personal use only; see ./assets/fonts/LICENSE-Acthirey.txt. */
 @font-face {
-  font-family: "Safina Bralyn";
+  font-family: "Acthirey";
   src:
-    url("./assets/fonts/Safina-Bralyn.woff2") format("woff2"),
-    url("./assets/fonts/Safina-Bralyn.otf") format("opentype");
+    url("./assets/fonts/Acthirey-Demo.woff2") format("woff2"),
+    url("./assets/fonts/Acthirey-Demo.ttf") format("truetype");
   font-weight: normal;
   font-style: normal;
   font-display: swap;

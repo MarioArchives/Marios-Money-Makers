@@ -1,5 +1,12 @@
 # PTB: UK Stocks Dashboard
 
+> **Historical document.** This plan describes the original `yfinance` / UK-ticker
+> build. On 2026-08-20 the app was migrated to the Alpaca Market Data API (IEX
+> feed), a SQLite backup store with `1d | 30d | 1y` history tiers, and a fixed
+> universe of 20 US large caps, under the name *Mario's Money Makers*. The
+> `README.md` at the repo root is the current source of truth; nothing below has
+> been updated for the migration.
+
 ## Status
 - stage: done (v3 complete: backend 44/44 pytest, frontend 108/108 vitest; pending live smoke test)
 - plan version: 3

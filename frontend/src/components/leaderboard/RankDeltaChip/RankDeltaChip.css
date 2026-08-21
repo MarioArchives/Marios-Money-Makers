@@ -1,0 +1,53 @@
+/* Rank-change chip: rides on the ticker line, pops in, lingers, fades. */
+.rank-delta {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 0.35em;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  vertical-align: 0.05em;
+  white-space: nowrap;
+  animation: rank-delta-life var(--motion-rank-delta) var(--ease) both;
+}
+
+.rank-delta--up {
+  color: var(--color-up);
+  background: color-mix(in srgb, var(--color-up) 14%, transparent);
+}
+
+.rank-delta--down {
+  color: var(--color-down);
+  background: color-mix(in srgb, var(--color-down) 12%, transparent);
+}
+
+@keyframes rank-delta-life {
+  0% {
+    opacity: 0;
+    transform: translateY(0.2em) scale(0.8);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0) scale(1.08);
+  }
+  20% {
+    transform: scale(1);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rank-delta {
+    animation: none;
+    opacity: 1;
+  }
+}

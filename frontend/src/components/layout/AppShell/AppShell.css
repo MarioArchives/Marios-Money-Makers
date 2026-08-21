@@ -17,7 +17,9 @@
   padding: var(--space-3) var(--space-5);
   background: var(--color-bar);
   color: var(--color-bar-text);
-  border-bottom: 2px solid var(--color-accent);
+  /* The 2px brass bottom border is drawn by PollCountdownBar (absolute,
+     bottom edge) so it can double as the poll countdown. */
+  padding-bottom: calc(var(--space-3) + 2px);
   transition:
     padding var(--motion-base) var(--ease),
     box-shadow var(--motion-base) var(--ease);
@@ -26,7 +28,7 @@
 /* Scrolled: the bar tightens, lifts, and hands the centre to the mark. */
 .app-shell__bar.is-condensed {
   padding-top: var(--space-2);
-  padding-bottom: var(--space-2);
+  padding-bottom: calc(var(--space-2) + 2px);
   box-shadow: 0 8px 20px -14px rgb(16 31 46 / 55%);
 }
 
@@ -48,14 +50,15 @@
   letter-spacing: var(--tracking-wide);
   color: var(--color-bar-text-muted);
   padding: var(--space-1) 0;
-  border-bottom: 1px solid transparent;
+  /* border-bottom: 1px solid transparent; */
   transition:
     color var(--motion-fast) var(--ease),
     border-color var(--motion-fast) var(--ease);
 }
 
 .app-shell__link:hover {
-  color: var(--color-bar-text);
+  color: black;
+  font-weight: 400;
 }
 
 .app-shell__link.active {
@@ -74,13 +77,15 @@
   transition:
     opacity var(--motion-base) var(--ease),
     visibility var(--motion-base) var(--ease);
-  font-family: var(--headder-font);
-  font-size: var(--text-md);
-  font-weight: 500;
-  letter-spacing: var(--tracking-wider);
+  font-family: var(--header-font);
+  /* Acthirey ships Regular only: never ask for bold (the browser would
+     synthesise it and smear the hairlines that define the face). It is a
+     display serif, so it needs size, not weight. */
+  font-size: 1rem;
+  font-weight: 400;
+  letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
   white-space: nowrap;
-  font-weight: bold;
 }
 
 .app-shell__content {
@@ -107,7 +112,7 @@
   .app-shell__title {
     justify-self: center;
     order: 1;
-    font-size: var(--text-base);
+    font-size: var(--text-lg);
   }
 
   .app-shell__content {
@@ -120,16 +125,15 @@
    the condensed state is one smooth transition. */
 
 .app-shell__logo {
-  font-family: var(--headder-font);
-  font-weight: bold;
+  font-family: var(--header-font);
   position: absolute;
   top: 50%;
   left: calc(100% - var(--space-5));
   transform: translate(-100%, -50%);
   display: inline-flex;
   align-items: flex-start;
-  font-weight: 700;
-  font-size: var(--text-md);
+  font-weight: 400;
+  font-size: 1rem;
   color: var(--color-bar-text);
   /* border: 1px solid var(--color-bar-text); */
   border-radius: var(--radius-sm);
@@ -148,7 +152,7 @@
 /* The cube: raised to the M's shoulder — top right, never baseline. */
 .app-shell__logo-sup {
   border: 0 solid black;
-  font-size: 0.6em;
+  font-size: 0.6rem;
   line-height: 1;
   margin-left: 1px;
   transform: translateY(-0.35em);

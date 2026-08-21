@@ -20,3 +20,11 @@ frontend/dist/
 .vscode/
 .idea/
 .secrets.sh
+
+# SQLite data
+backend/data/
+
+# TypeScript build artefacts (tsc -b)
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts

@@ -5,8 +5,6 @@ concurrent cache-miss callers for the same key collapse into a single
 underlying fetch (thundering-herd protection), per the plan's data-flow
 section. Also exposes a way to peek a stale (expired-but-previously-cached)
 value so callers can serve last-known-good data when a fresh fetch fails.
-
-SKELETON ONLY: signatures and types are final, bodies are not implemented.
 """
 
 from __future__ import annotations

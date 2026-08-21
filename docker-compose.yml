@@ -5,8 +5,14 @@ services:
       - "8000:8000"
     environment:
       - ALLOWED_ORIGINS=http://localhost:5173
+      # Alpaca credentials: source .secrets.sh in your shell before
+      # `docker compose up` so these expand (never committed; see .gitignore).
+      - KEY_ID=${KEY_ID}
+      - SECRET=${SECRET}
     volumes:
       - ./backend/app:/app/app
+      # SQLite store survives container rebuilds/restarts.
+      - stocks-data:/app/data
 
   frontend:
     build: ./frontend
@@ -19,3 +25,6 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+
+volumes:
+  stocks-data:

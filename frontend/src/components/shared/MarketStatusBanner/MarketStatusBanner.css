@@ -1,0 +1,57 @@
+/* A hairline notice on sunken paper, the same weight as ConnectionBanner:
+   a footnote to the board, not a warning. The mark is a brass dot while the
+   market is shut and a racing-green one while it trades — the only colour
+   the banner carries. */
+.market-status-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.market-status-banner.is-open {
+  border-left-color: var(--color-up);
+}
+
+.market-status-banner__mark {
+  flex: none;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  opacity: 0.9;
+}
+
+.market-status-banner.is-open .market-status-banner__mark {
+  background: var(--color-up);
+}
+
+.market-status-banner__text {
+  color: var(--color-text);
+}
+
+/* The countdown is a number, so it speaks in the ledger's mono voice;
+   tabular figures keep it from jiggling as the seconds tick. */
+.market-status-banner__countdown {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.market-status-banner__hint {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}

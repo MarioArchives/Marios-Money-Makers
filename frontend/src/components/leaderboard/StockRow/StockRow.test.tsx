@@ -5,14 +5,15 @@ import { describe, it, expect, vi } from 'vitest'
 import { StockRow } from './StockRow'
 import type { StockRowProps } from './StockRow.props'
 import type { StockSummary } from '../../../api/types'
+import { FxRateContext } from '../../../providers/FxRateProvider/FxRateProvider'
 
 function makeStock(overrides: Partial<StockSummary> = {}): StockSummary {
   return {
-    ticker: 'AZN.L',
-    name: 'AstraZeneca',
-    sector: 'Pharma',
+    ticker: 'AAPL',
+    name: 'Apple',
+    sector: 'Technology',
     price: 1234.56,
-    currency: 'GBP',
+    currency: 'USD',
     previous_close: 1200,
     change: 34.56,
     change_percent: 2.88,
@@ -32,21 +33,27 @@ function renderRow(stock: StockSummary) {
 
 describe('StockRow', () => {
   it('renders the company name and icon', () => {
-    renderRow(makeStock({ name: 'AstraZeneca', ticker: 'AZN.L' }))
+    renderRow(makeStock({ name: 'Apple', ticker: 'AAPL' }))
 
-    expect(screen.getByText('AstraZeneca')).toBeInTheDocument()
-    const icon = screen.getByRole('img', { name: 'AstraZeneca' }) as HTMLImageElement
-    expect(icon.getAttribute('src')).toBe('/logos/AZN.L.svg')
+    expect(screen.getByText('Apple')).toBeInTheDocument()
+    const icon = screen.getByRole('img', { name: 'Apple' }) as HTMLImageElement
+    expect(icon.getAttribute('src')).toBe('/logos/AAPL.svg')
   })
 
-  it('renders the price formatted as pounds with thousands separator', () => {
-    renderRow(makeStock({ price: 1234.56 }))
+  it('renders the price in the API currency with thousands separator (no FX rate yet)', () => {
+    renderRow(makeStock({ price: 1234.56, currency: 'USD' }))
 
-    expect(screen.getByText('£1,234.56')).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
   })
 
   it('renders a small price without a thousands separator correctly', () => {
     renderRow(makeStock({ price: 112.34 }))
+
+    expect(screen.getByText('$112.34')).toBeInTheDocument()
+  })
+
+  it('follows the per-stock currency field rather than assuming one currency', () => {
+    renderRow(makeStock({ price: 112.34, currency: 'GBP' }))
 
     expect(screen.getByText('£112.34')).toBeInTheDocument()
   })
@@ -66,10 +73,10 @@ describe('StockRow', () => {
   })
 
   it('links to the stock detail page for the row ticker', () => {
-    renderRow(makeStock({ ticker: 'VOD.L' }))
+    renderRow(makeStock({ ticker: 'MSFT' }))
 
     const link = screen.getByRole('link')
-    expect(link).toHaveAttribute('href', '/stock/VOD.L')
+    expect(link).toHaveAttribute('href', '/stock/MSFT')
   })
 
   it('renders no staleness marker for a fresh row', () => {
@@ -94,36 +101,36 @@ describe('StockRow degraded state', () => {
   })
 
   it('greys the row out when the stock carries an error, even if not flagged stale', () => {
-    renderRow(makeStock({ is_stale: false, error: 'fetch failed for AZN.L' }))
+    renderRow(makeStock({ is_stale: false, error: 'fetch failed for AAPL' }))
 
     expect(screen.getByTestId('stock-row').classList.contains('is-stale')).toBe(true)
   })
 
   it('marks a degraded row with the subtle stale dot', () => {
-    renderRow(makeStock({ is_stale: true, error: 'fetch failed for AZN.L' }))
+    renderRow(makeStock({ is_stale: true, error: 'fetch failed for AAPL' }))
 
     expect(screen.getByTestId('stale-dot')).toBeInTheDocument()
   })
 
   it('keeps showing the last known price and never renders the error text', () => {
-    renderRow(makeStock({ price: 1234.56, is_stale: true, error: 'fetch failed for AZN.L' }))
+    renderRow(makeStock({ price: 1234.56, is_stale: true, error: 'fetch failed for AAPL' }))
 
-    expect(screen.getByText('£1,234.56')).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
     expect(screen.queryByText(/fetch failed/i)).not.toBeInTheDocument()
     expect(screen.getByTestId('stock-row').textContent).not.toContain('fetch failed')
   })
 
   it('falls back to an em dash when there is no last known price at all', () => {
-    renderRow(makeStock({ price: null, is_stale: true, error: 'fetch failed for AZN.L' }))
+    renderRow(makeStock({ price: null, is_stale: true, error: 'fetch failed for AAPL' }))
 
     expect(screen.getByText('—')).toBeInTheDocument()
   })
 
   it('still renders the company name and link on a degraded row', () => {
-    renderRow(makeStock({ ticker: 'VOD.L', name: 'Vodafone', is_stale: true }))
+    renderRow(makeStock({ ticker: 'MSFT', name: 'Microsoft', is_stale: true }))
 
-    expect(screen.getByText('Vodafone')).toBeInTheDocument()
-    expect(screen.getByRole('link')).toHaveAttribute('href', '/stock/VOD.L')
+    expect(screen.getByText('Microsoft')).toBeInTheDocument()
+    expect(screen.getByRole('link')).toHaveAttribute('href', '/stock/MSFT')
   })
 })
 
@@ -193,5 +200,43 @@ describe('StockRow memoization', () => {
     } finally {
       setInnerRenderFn(original)
     }
+  })
+})
+
+/**
+ * Every price on the board is displayed in GBP, converted at the shared
+ * FxRateProvider rate; the native figure is only a fallback for when no
+ * rate is available (the tests above render without a provider).
+ */
+describe('StockRow GBP display', () => {
+  const rate = { base: 'USD', quote: 'GBP', rate: 0.5, date: '2026-08-20', source: 'ECB' } as const
+
+  function renderWithRate(stock: StockSummary) {
+    return render(
+      <FxRateContext.Provider value={{ status: 'ready', rate }}>
+        <MemoryRouter>
+          <StockRow stock={stock} />
+        </MemoryRouter>
+      </FxRateContext.Provider>,
+    )
+  }
+
+  it('shows the USD price converted to GBP and never the dollar figure', () => {
+    renderWithRate(makeStock({ price: 1234.56, currency: 'USD' }))
+
+    expect(screen.getByText('£617.28')).toBeInTheDocument()
+    expect(screen.queryByText('$1,234.56')).not.toBeInTheDocument()
+  })
+
+  it('leaves a GBP-denominated price untouched', () => {
+    renderWithRate(makeStock({ price: 112.34, currency: 'GBP' }))
+
+    expect(screen.getByText('£112.34')).toBeInTheDocument()
+  })
+
+  it('still shows an em dash when there has never been a price', () => {
+    renderWithRate(makeStock({ price: null }))
+
+    expect(screen.getByText('—')).toBeInTheDocument()
   })
 })
