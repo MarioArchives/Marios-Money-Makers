@@ -48,7 +48,9 @@ describe('AppShell', () => {
     expect(screen.getAllByRole('link')).toHaveLength(2)
   })
 
-  it('sticks and condenses on scroll: hides the title, keeps the logo', () => {
+  // Visual state (navy bar, title out, white centred logo in) is CSS keyed
+  // off `is-condensed`; here we only assert the class toggles with scroll.
+  it('sticks and condenses on scroll: toggles is-condensed, logo stays mounted', () => {
     renderShellAtRoute('/')
     const bar = screen.getByRole('banner')
 
