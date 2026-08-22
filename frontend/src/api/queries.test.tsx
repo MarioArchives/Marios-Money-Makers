@@ -2,10 +2,13 @@ import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import { type Query } from '@tanstack/react-query'
 import {
   POLL_INTERVAL_MS,
   STALE_TIME_MS,
+  alignedPollInterval,
   historyKey,
+  msUntilNextPoll,
   stockKey,
   stocksKey,
   storedKey,
@@ -158,11 +161,14 @@ describe('useStoredDataQuery', () => {
     expect(client.getQueryData(storedKey('AAPL', 'hour'))).toEqual(stored)
     expect(client.getQueryData(storedKey('AAPL', 'minute'))).toBeUndefined()
     const query = client.getQueryCache().find({ queryKey: storedKey('AAPL', 'hour') })
-    expect((query?.options as { refetchInterval?: number } | undefined)?.refetchInterval).toBe(
-      POLL_INTERVAL_MS,
-    )
+    expect(refetchIntervalOf(query)).toBe(alignedPollInterval)
   })
 })
+
+/** The `refetchInterval` option a hook registered on its query. */
+function refetchIntervalOf(query: Query | undefined): unknown {
+  return (query?.options as { refetchInterval?: unknown } | undefined)?.refetchInterval
+}
 
 describe('polling configuration constants', () => {
   it('exposes a 20s poll interval, matching the plan', () => {
@@ -171,6 +177,34 @@ describe('polling configuration constants', () => {
 
   it('exposes a staleTime shorter than the poll interval', () => {
     expect(STALE_TIME_MS).toBeLessThan(POLL_INTERVAL_MS)
+  })
+})
+
+describe('shared poll tick', () => {
+  it('msUntilNextPoll counts down to the next wall-clock multiple of the interval', () => {
+    const tick = POLL_INTERVAL_MS * 7
+    expect(msUntilNextPoll(tick)).toBe(POLL_INTERVAL_MS)
+    expect(msUntilNextPoll(tick + 5_000)).toBe(POLL_INTERVAL_MS - 5_000)
+    expect(msUntilNextPoll(tick + POLL_INTERVAL_MS - 1)).toBe(1)
+    expect(msUntilNextPoll(tick + 1_234, 10_000)).toBe(10_000 - 1_234)
+  })
+
+  it('is never 0 (which React Query would read as "stop polling") and never exceeds the interval', () => {
+    for (let offset = 0; offset < POLL_INTERVAL_MS; offset += 997) {
+      const ms = msUntilNextPoll(POLL_INTERVAL_MS * 3 + offset)
+      expect(ms).toBeGreaterThan(0)
+      expect(ms).toBeLessThanOrEqual(POLL_INTERVAL_MS)
+    }
+  })
+
+  it('alignedPollInterval is a refetchInterval function that lands on the next tick', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(POLL_INTERVAL_MS * 9 + 4_000)
+      expect(alignedPollInterval()).toBe(POLL_INTERVAL_MS - 4_000)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -191,7 +225,7 @@ describe('useStocksQuery', () => {
     expect(mockedApiGet).toHaveBeenCalledWith('/api/stocks')
   })
 
-  it('is registered under the stocks query key with a 20s refetchInterval', async () => {
+  it('is registered under the stocks query key, polling on the shared 20s tick', async () => {
     mockedApiGet.mockResolvedValueOnce(mockStocksResponse)
     const client = makeQueryClient()
 
@@ -200,9 +234,33 @@ describe('useStocksQuery', () => {
     await waitFor(() => {
       const query = client.getQueryCache().find({ queryKey: stocksKey })
       expect(query).toBeDefined()
-      expect((query?.options as { refetchInterval?: number } | undefined)?.refetchInterval).toBe(
-        POLL_INTERVAL_MS,
-      )
+      expect(refetchIntervalOf(query)).toBe(alignedPollInterval)
+    })
+  })
+
+  it('every polled stock hook shares the same aligned refetch schedule', async () => {
+    mockedApiGet.mockResolvedValue(mockStocksResponse)
+    const client = makeQueryClient()
+    const wrapper = createWrapper(client)
+
+    renderHook(() => useStocksQuery(), { wrapper })
+    renderHook(() => useStockDetailQuery('AZN.L'), { wrapper })
+    renderHook(() => useStockHistoryQuery('AZN.L', '30d'), { wrapper })
+    renderHook(() => useStoredDataQuery('AZN.L', 'hour'), { wrapper })
+
+    await waitFor(() => {
+      const intervals = [
+        stocksKey,
+        stockKey('AZN.L'),
+        historyKey('AZN.L', '30d'),
+        storedKey('AZN.L', 'hour'),
+      ].map((queryKey) => refetchIntervalOf(client.getQueryCache().find({ queryKey })))
+      expect(intervals).toEqual([
+        alignedPollInterval,
+        alignedPollInterval,
+        alignedPollInterval,
+        alignedPollInterval,
+      ])
     })
   })
 })

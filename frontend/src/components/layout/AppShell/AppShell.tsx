@@ -8,9 +8,10 @@ const CONDENSE_SCROLL_Y = 24;
 /**
  * Top-level layout route. Header bar: left menu slot, centred masthead
  * title. The bar is sticky; once the page is scrolled it condenses — the
- * pastel bar turns black, the title fades out and the (otherwise hidden)
- * M-cubed mark fades in, white, at the centre. Which state is active is
- * purely a CSS concern keyed off `is-condensed`.
+ * pastel bar turns brass, the title fades out, the bar sits empty for a
+ * beat, then the (otherwise hidden) M-cubed mark fades in, white, at the
+ * centre. Which state is active is purely a CSS concern keyed off
+ * `is-condensed`.
  * The bar's bottom border is the `PollCountdownBar` (time until
  * the next data poll). Pure plumbing/layout — no data fetching or business
  * logic of its own.

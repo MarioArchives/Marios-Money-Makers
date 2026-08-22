@@ -16,8 +16,12 @@ function makeClient(): QueryClient {
 
 const valueNow = (): number => Number(screen.getByRole('progressbar').getAttribute('aria-valuenow'))
 
+/** A wall-clock instant that is exactly on a poll tick, so a cycle starts at 100. */
+const TICK_ZERO = POLL_INTERVAL_MS * 1_000_000
+
 beforeEach(() => {
   vi.useFakeTimers()
+  vi.setSystemTime(TICK_ZERO)
 })
 
 afterEach(() => {
@@ -33,7 +37,7 @@ describe('PollCountdownBar', () => {
     expect(bar.classList.contains('is-fetching')).toBe(false)
   })
 
-  it('drains from full to empty over the poll interval after data lands', async () => {
+  it('drains from full to empty over the poll interval after data lands, then snaps back on the tick', async () => {
     const client = makeClient()
     client.setQueryData(['stocks'], { stocks: [] }, { updatedAt: Date.now() })
 
@@ -52,13 +56,23 @@ describe('PollCountdownBar', () => {
     expect(valueNow()).toBeLessThanOrEqual(55)
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS / 2 + 500)
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS / 2 - 250)
     })
-    expect(valueNow()).toBe(0)
-    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuetext', '0 s until next refresh')
+    expect(valueNow()).toBeLessThanOrEqual(2)
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuetext', '1 s until next refresh')
+
+    // The shared tick: a new cycle starts at full.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250)
+    })
+    expect(valueNow()).toBe(100)
   })
 
-  it('refills to full when fresh data lands', async () => {
+  // Regression: on the stock page, switching 1d -> 30d -> all mounts a new
+  // history query mid-cycle. Its fetch landing must neither refill the bar
+  // nor jump it to some other partial value — every polled query refetches
+  // on the same tick, and the bar shows only that one cycle.
+  it('keeps the one shared cycle when another polled query lands mid-cycle (range switch)', async () => {
     const client = makeClient()
     client.setQueryData(['stocks'], { stocks: [] }, { updatedAt: Date.now() })
     render(
@@ -69,15 +83,67 @@ describe('PollCountdownBar', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000)
     })
-    expect(valueNow()).toBeLessThan(40)
+    const before = valueNow()
+    expect(before).toBeGreaterThan(20)
+    expect(before).toBeLessThan(30)
 
     act(() => {
+      client.setQueryData(['stock', 'AZN.L', 'history', '30d'], { points: [] }, { updatedAt: Date.now() })
       client.setQueryData(['stocks'], { stocks: [1] }, { updatedAt: Date.now() })
     })
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0)
     })
+    expect(valueNow()).toBe(before)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
     expect(valueNow()).toBe(100)
+  })
+
+  // Regression: switching *back* to a range that is already cached (and
+  // stale) refetches it on mount. That in-flight, old-data query must not
+  // drop the bar to 0 or otherwise disturb the cycle; it only pulses.
+  it('does not dent the cycle when a stale cached query remounts and refetches mid-cycle', async () => {
+    const client = makeClient()
+    client.setQueryData(['stocks'], { stocks: [] }, { updatedAt: Date.now() })
+    client.setQueryData(['stock', 'AZN.L', 'history', '1d'], { points: [] }, {
+      updatedAt: Date.now() - 3 * POLL_INTERVAL_MS,
+    })
+    function StaleRange(): JSX.Element {
+      // staleTime 0 -> refetches on mount; never resolves -> stays in flight.
+      useQuery({
+        queryKey: ['stock', 'AZN.L', 'history', '1d'],
+        queryFn: () => new Promise(() => undefined),
+        staleTime: 0,
+      })
+      return <Harness queryFn={async () => ({ stocks: [] })} />
+    }
+    function Page({ showRange }: { showRange: boolean }): JSX.Element {
+      return (
+        <QueryClientProvider client={client}>
+          {showRange ? <StaleRange /> : <Harness queryFn={async () => ({ stocks: [] })} />}
+        </QueryClientProvider>
+      )
+    }
+
+    const { rerender } = render(<Page showRange={false} />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    const before = valueNow()
+    expect(before).toBeGreaterThan(20)
+    expect(before).toBeLessThan(30)
+
+    rerender(<Page showRange />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250)
+    })
+    const bar = screen.getByRole('progressbar')
+    expect(bar.classList.contains('is-fetching')).toBe(true)
+    expect(valueNow()).toBeGreaterThan(20)
+    expect(valueNow()).toBeLessThan(30)
   })
 
   it('pulses while a poll is in flight', async () => {
@@ -110,7 +176,7 @@ describe('PollCountdownBar', () => {
       </QueryClientProvider>,
     )
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(15_300)
     })
 
     expect(valueNow()).toBe(100)

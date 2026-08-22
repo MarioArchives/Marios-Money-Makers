@@ -16,6 +16,32 @@ import {
 export const POLL_INTERVAL_MS = 20000
 
 /**
+ * Milliseconds from `now` until the next wall-clock multiple of
+ * `intervalMs` — always in (0, intervalMs]. Every polled stock query
+ * schedules its refetch on this *shared* tick rather than "N ms after my
+ * own last fetch", so queries that mount at different moments (switching
+ * 1d -> 30d -> all on the stock page, a cached range remounting, the
+ * detail/chart/table trio) all refresh together. That gives the header
+ * countdown (`usePollCountdown`) exactly one cycle to show instead of a
+ * ragged set of per-query timers jumping it to partial fills.
+ */
+export function msUntilNextPoll(
+  now: number = Date.now(),
+  intervalMs: number = POLL_INTERVAL_MS,
+): number {
+  return intervalMs - (now % intervalMs)
+}
+
+/**
+ * `refetchInterval` for the polled stock queries. React Query re-evaluates
+ * a function interval after every fetch (and restarts its timer from that
+ * moment), so each refetch lands on the next shared tick.
+ */
+export function alignedPollInterval(): number {
+  return msUntilNextPoll()
+}
+
+/**
  * staleTime (ms) used for every stock-related query. Kept just under
  * POLL_INTERVAL_MS so a scheduled refetch is always considered "due".
  */
@@ -48,7 +74,7 @@ export function useStocksQuery(): UseQueryResult<StocksResponse, Error> {
   return useQuery({
     queryKey: stocksKey,
     queryFn: () => apiGet<StocksResponse>('/api/stocks'),
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
   })
 }
@@ -61,7 +87,7 @@ export function useStockDetailQuery(ticker: string): UseQueryResult<StockSummary
   return useQuery({
     queryKey: stockKey(ticker),
     queryFn: () => apiGet<StockSummary>(`/api/stocks/${ticker}`),
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
   })
 }
@@ -79,7 +105,7 @@ export function useStockHistoryQuery(
   return useQuery({
     queryKey: historyKey(ticker, range),
     queryFn: () => apiGet<HistoryResponse>(`/api/stocks/${ticker}/history?range=${range}`),
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
   })
 }
@@ -108,7 +134,7 @@ export function useStoredDataQuery(
   return useQuery({
     queryKey: storedKey(ticker, tier),
     queryFn: () => apiGet<StoredDataResponse>(`/api/stocks/${ticker}/stored?tier=${tier}`),
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
   })
 }
