@@ -22,14 +22,21 @@
   padding-bottom: calc(var(--space-3) + 2px);
   transition:
     padding var(--motion-base) var(--ease),
+    background-color var(--motion-base) var(--ease),
+    color var(--motion-base) var(--ease),
     box-shadow var(--motion-base) var(--ease);
 }
 
-/* Scrolled: the bar tightens, lifts, and hands the centre to the mark. */
+/* Scrolled: the bar tightens, goes black (navy ink on pastel inverts to
+   white on black), lifts, and hands the centre to the mark. */
 .app-shell__bar.is-condensed {
+  --color-bar-text: #ffffff;
+  --color-bar-text-muted: rgb(255 255 255 / 70%);
   padding-top: var(--space-2);
   padding-bottom: calc(var(--space-2) + 2px);
-  box-shadow: 0 8px 20px -14px rgb(16 31 46 / 55%);
+  background: #000000;
+  color: var(--color-bar-text);
+  box-shadow: 0 8px 20px -14px rgb(0 0 0 / 70%);
 }
 
 .app-shell__bar.is-condensed .app-shell__title {
@@ -57,7 +64,7 @@
 }
 
 .app-shell__link:hover {
-  color: black;
+  color: var(--color-bar-text);
   font-weight: 400;
 }
 
@@ -120,33 +127,37 @@
   }
 }
 
-/* The M-cubed mark: an engraved plate pinned to the bar's right edge.
-   Absolutely positioned via left+transform so the ride to the centre in
-   the condensed state is one smooth transition. */
+/* The M-cubed mark. Hidden at rest — the masthead title owns the bar —
+   and only surfaces once the page is scrolled: it simply fades in, white,
+   at the centre of the now-black bar, in the place the title vacated. It
+   lives at the centre permanently (no slide from the right); only opacity
+   animates. */
 
 .app-shell__logo {
   font-family: var(--header-font);
   position: absolute;
   top: 50%;
-  left: calc(100% - var(--space-5));
-  transform: translate(-100%, -50%);
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: inline-flex;
   align-items: flex-start;
   font-weight: 400;
   font-size: 1rem;
-  color: var(--color-bar-text);
-  /* border: 1px solid var(--color-bar-text); */
+  color: #ffffff;
   border-radius: var(--radius-sm);
   padding: 0 var(--space-2);
   line-height: 1.5;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
   transition:
-    left var(--motion-base) var(--ease),
-    transform var(--motion-base) var(--ease);
+    opacity var(--motion-base) var(--ease),
+    visibility var(--motion-base) var(--ease);
 }
 
 .app-shell__bar.is-condensed .app-shell__logo {
-  left: 50%;
-  transform: translate(-50%, -50%);
+  opacity: 1;
+  visibility: visible;
 }
 
 /* The cube: raised to the M's shoulder — top right, never baseline. */
