@@ -23,12 +23,9 @@ unparseable stored boundary counts as stale, so a corrupt row is
 refetched rather than trusted.
 
 Single flight, same shape as the stocks router: an in-process
-``asyncio.Lock`` (double-checked freshness after acquiring) plus a
-cross-process lease row in ``fetch_claims`` under the pseudo-pair
-``(storage.CLOCK_TIER, storage.CLOCK_KEY)`` -- a lease key only, there is
-no ``bars_clock`` table. A process that finds the lease held by someone
-else simply serves the stored clock (marked stale if it's outside the
-freshness window) rather than fetching too.
+``asyncio.Lock`` (double-checked freshness after acquiring) is the whole
+guarantee -- this app only ever runs as a single process, so there is no
+cross-process lease to take on top of it.
 
 Failure policy: an Alpaca failure serves the stored clock with
 ``is_stale=True`` and ``error`` set (the ``meta`` row is left untouched),
@@ -50,7 +47,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
-from app import alpaca_client, config, storage
+from app import alpaca_client, storage
 from app.alpaca_client import AlpacaError
 from app.routers.stocks import _iso, _parse_iso
 from app.schemas import MarketClockResponse
@@ -59,9 +56,10 @@ logger = logging.getLogger("app.routers.market")
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
-# In-process single-flight locks, keyed like `stocks._refresh_locks`
-# (there is only ever one key here, `storage.CLOCK_TIER`). Tests reset
-# this to `{}` between cases.
+# In-process single-flight locks, keyed like `stocks._refresh_locks` (there
+# is only ever one key here, `_CLOCK_LOCK_KEY`). Tests reset this to `{}`
+# between cases.
+_CLOCK_LOCK_KEY = "clock"
 _refresh_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -87,11 +85,9 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
     """Return ``(stored_clock, is_stale, error)``, refreshing via Alpaca
     when the stored clock is missing or stale (see the module docstring).
 
-    Raises :class:`AlpacaError` iff there is nothing to serve: either the
-    fetch failed and nothing was ever stored, or the cross-process lease
-    is held elsewhere and nothing was ever stored. Callers decide how to
-    surface that (503 for the endpoint, logged-and-swallowed for the
-    sweep's :func:`refresh_clock`).
+    Raises :class:`AlpacaError` iff the fetch itself failed and nothing was
+    ever stored. Callers decide how to surface that (503 for the endpoint,
+    logged-and-swallowed for the sweep's :func:`refresh_clock`).
     """
     storage.init_db()
     now = _utcnow()
@@ -99,7 +95,7 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
     if stored is not None and _is_fresh(stored, now):
         return stored, False, None
 
-    lock = _refresh_locks.setdefault(storage.CLOCK_TIER, asyncio.Lock())
+    lock = _refresh_locks.setdefault(_CLOCK_LOCK_KEY, asyncio.Lock())
     async with lock:
         # Double-checked: the leader we queued behind may have refreshed
         # (serve fresh) or failed (serve stale, no backoff -- try again on
@@ -108,22 +104,6 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
         stored = storage.get_market_clock()
         if stored is not None and _is_fresh(stored, now):
             return stored, False, None
-
-        claim_id = storage.try_claim(
-            storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(now), config.FETCH_LEASE_SECONDS
-        )
-        if claim_id is None:
-            # Another process holds the lease and is fetching right now;
-            # serve what is stored (it may even have landed fresh since
-            # our check above).
-            stored = storage.get_market_clock()
-            if stored is None:
-                raise AlpacaError(
-                    f"{alpaca_client.ERROR_PREFIX}: market clock refresh is "
-                    "already in progress on another process and nothing "
-                    "is cached yet"
-                )
-            return stored, not _is_fresh(stored, _utcnow()), None
 
         try:
             clock = await asyncio.to_thread(alpaca_client.fetch_clock)
@@ -145,10 +125,6 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
             if stored is None:
                 raise
             return stored, True, str(exc)
-        finally:
-            # Fenced by our claim_id: a release after another process took
-            # an expired lease over is a no-op (its claim stays in place).
-            storage.release_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, claim_id)
 
 
 @router.get("/clock", response_model=MarketClockResponse)

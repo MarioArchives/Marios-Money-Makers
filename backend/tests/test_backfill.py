@@ -185,7 +185,7 @@ class TestSweep:
         for ticker in TICKER_SYMBOLS:
             assert log[("minute", ticker)] == _iso(fake_utcnow.now)
             assert log[("hour", ticker)] == _iso(NOW)
-            assert log[("month", ticker)] == _iso(NOW)
+            assert log[("days", ticker)] == _iso(NOW)
 
     @patch("app.routers.stocks.alpaca_client.fetch_bars")
     async def test_rate_limit_pauses_then_retries_that_pair_and_continues(
@@ -254,11 +254,11 @@ class TestSweep:
         assert mock_fetch.call_count == 60
         log = _fetch_log()
         assert log[("hour", "AAPL")] is None
-        assert log[("month", "MSFT")] is None
-        failed = {("hour", "AAPL"), ("month", "MSFT")}
+        assert log[("days", "MSFT")] is None
+        failed = {("hour", "AAPL"), ("days", "MSFT")}
         assert all(v == _iso(NOW) for pair, v in log.items() if pair not in failed)
         assert any("hour/AAPL" in r.getMessage() for r in caplog.records)
-        assert any("month/MSFT" in r.getMessage() for r in caplog.records)
+        assert any("days/MSFT" in r.getMessage() for r in caplog.records)
 
     @patch("app.routers.stocks.alpaca_client.fetch_bars")
     async def test_sweep_shares_lock_with_endpoint_refresh(
@@ -362,17 +362,17 @@ class TestLifespanAdjustmentMigration:
     ):
         monkeypatch.setattr(config, "ALPACA_BARS_ADJUSTMENT", "split")
         # Legacy DB: bars + stamps but no meta key -> fetched as `raw`.
-        storage.upsert_bars("month", "NFLX", [_bar(_iso(NOW), 1112.1)], _iso(NOW))
-        storage.record_fetch("month", "NFLX", _iso(NOW))
+        storage.upsert_bars("days", "NFLX", [_bar(_iso(NOW), 1112.1)], _iso(NOW))
+        storage.record_fetch("days", "NFLX", _iso(NOW))
         storage.record_fetch(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY, _iso(NOW))
 
         with TestClient(app):
             pass
 
         assert storage.get_meta(storage.BARS_ADJUSTMENT_META_KEY) == "split"
-        assert storage.last_fetch_at("month", "NFLX") is None
+        assert storage.last_fetch_at("days", "NFLX") is None
         assert storage.last_fetch_at(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY) == _iso(NOW)
-        assert len(storage.get_stored_rows("month", "NFLX")) == 1
+        assert len(storage.get_stored_rows("days", "NFLX")) == 1
 
 
 class TestConfigDefaults:
@@ -385,14 +385,14 @@ class TestConfigDefaults:
 
 class TestSweepReachesBackToOldestDailyBar:
     @patch("app.routers.stocks.alpaca_client.fetch_bars")
-    async def test_month_pair_start_is_the_oldest_stored_row(
+    async def test_days_pair_start_is_the_oldest_stored_row(
         self, mock_fetch, fake_utcnow, sleeps
     ):
         # The sweep goes through `refresh_history`, so a daily bar that has
         # aged out of the 365d window still widens AAPL's 1Day request;
-        # other tickers' month pairs keep the plain window.
+        # other tickers' daily pairs keep the plain window.
         ancient = _iso(NOW - timedelta(days=3 * 365))
-        storage.upsert_bars("month", "AAPL", [_bar(ancient, 42.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(ancient, 42.0)], _iso(NOW))
         mock_fetch.return_value = []
 
         await backfill.sweep()

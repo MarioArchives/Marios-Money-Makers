@@ -1,7 +1,7 @@
 """Startup + periodic backfill sweep for the SQLite history store.
 
 Without this module, nothing refreshes the ``bars_minute`` / ``bars_hour``
-/ ``bars_month`` tables except a user opening a chart, so after the
+/ ``bars_days`` tables except a user opening a chart, so after the
 backend has been down for a while (or has simply had no chart viewers)
 most of the 20 tickers' history is frozen or empty. :func:`sweep` first
 refreshes the leaderboard's ``summaries`` table if it is stale

@@ -130,7 +130,7 @@ describe('query key builders', () => {
 
   it('builds ticker- and tier-scoped keys for stored data, distinct from history keys', () => {
     expect(storedKey('AAPL', 'minute')).toEqual(['stock', 'AAPL', 'stored', 'minute'])
-    expect(storedKey('AAPL', 'month')).not.toEqual(storedKey('AAPL', 'minute'))
+    expect(storedKey('AAPL', 'days')).not.toEqual(storedKey('AAPL', 'minute'))
     expect(storedKey('AAPL', 'minute')).not.toEqual(historyKey('AAPL', '1d'))
   })
 })
@@ -147,7 +147,7 @@ describe('useStoredDataQuery', () => {
       table: 'bars_hour',
       currency: 'USD',
       last_fetch_at: '2026-08-20T11:00:00Z',
-      counts: { minute: 3, hour: 1, month: 0 },
+      counts: { minute: 3, hour: 1, days: 0 },
       rows: [
         {
           ts: '2026-08-20T10:00:00Z',

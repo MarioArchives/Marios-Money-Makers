@@ -48,8 +48,7 @@ ALPACA_FEED = os.environ.get("ALPACA_FEED", "iex")
 # once whenever this value changes so already-stored bars get refetched.
 ALPACA_BARS_ADJUSTMENT = os.environ.get("ALPACA_BARS_ADJUSTMENT", "split")
 # Explicit httpx timeout (seconds, connect+read+write+pool) for every
-# Alpaca request. Must stay <= FETCH_LEASE_SECONDS: a fetch lease that
-# outlives a hung request is what lets another process take over.
+# Alpaca request.
 ALPACA_TIMEOUT_SECONDS = float(os.environ.get("ALPACA_TIMEOUT_SECONDS", "5.0"))
 
 # --- SQLite backup store ----------------------------------------------------
@@ -60,26 +59,18 @@ DB_PATH = os.environ.get(
     str(Path(__file__).resolve().parent.parent / "data" / "stocks.db"),
 )
 
-# Cross-process single flight: before fetching a (tier, ticker) from Alpaca
-# a worker claims a lease row in the `fetch_claims` table; another process
-# finding a live claim serves the DB instead of fetching too. The lease is
-# normally released as soon as the fetch finishes; FETCH_LEASE_SECONDS only
-# bounds how long a crashed/hung holder blocks others, so it must be >= the
-# Alpaca HTTP timeout.
-FETCH_LEASE_SECONDS = float(os.environ.get("FETCH_LEASE_SECONDS", "10"))
-
 # Per-tier "serve straight from SQLite without calling Alpaca" windows.
 FRESHNESS_MINUTE_SECONDS = float(os.environ.get("FRESHNESS_MINUTE_SECONDS", "20"))
 FRESHNESS_HOUR_SECONDS = float(os.environ.get("FRESHNESS_HOUR_SECONDS", "3600"))
-FRESHNESS_MONTH_SECONDS = float(os.environ.get("FRESHNESS_MONTH_SECONDS", "86400"))
+FRESHNESS_DAY_SECONDS = float(os.environ.get("FRESHNESS_DAY_SECONDS", "86400"))
 
 # Retention windows / backfill depth for the three bar tables. The
-# "month" tier (daily bars) is never pruned and backs the all-time view:
-# the first fetch backfills MONTH_BACKFILL_DAYS of daily bars, after which
+# "days" tier (daily bars) is never pruned and backs the all-time view:
+# the first fetch backfills DAY_BACKFILL_DAYS of daily bars, after which
 # the stored series only ever grows.
 MINUTE_RETENTION_HOURS = 24
 HOUR_RETENTION_DAYS = 30
-MONTH_BACKFILL_DAYS = int(os.environ.get("MONTH_BACKFILL_DAYS", "365"))
+DAY_BACKFILL_DAYS = int(os.environ.get("DAY_BACKFILL_DAYS", "365"))
 
 # --- Background backfill sweep ----------------------------------------------
 # On startup, and then every BACKFILL_INTERVAL_SECONDS, `app.backfill.sweep`

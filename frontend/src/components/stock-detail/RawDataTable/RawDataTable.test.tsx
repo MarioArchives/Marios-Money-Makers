@@ -40,7 +40,7 @@ function buildStoredResult(
       table: 'bars_minute',
       currency: 'USD',
       last_fetch_at: '2026-08-20T11:59:40Z',
-      counts: { minute: rows.length, hour: 7, month: 251 },
+      counts: { minute: rows.length, hour: 7, days: 251 },
       rows,
       ...overrides,
     },
@@ -193,11 +193,11 @@ describe('RawDataTable rendering', () => {
 
 describe('RawDataTable tier selection', () => {
   it('defaults the tier to the one behind the history range and offers all three with counts', () => {
-    mockedUseStoredDataQuery.mockReturnValue(buildStoredResult([bar('2026-08-19T00:00:00Z', 100)], { tier: 'month', table: 'bars_month' }))
+    mockedUseStoredDataQuery.mockReturnValue(buildStoredResult([bar('2026-08-19T00:00:00Z', 100)], { tier: 'days', table: 'bars_days' }))
 
     render(<RawDataTable ticker="AAPL" range="all" />)
 
-    expect(mockedUseStoredDataQuery).toHaveBeenCalledWith('AAPL', 'month')
+    expect(mockedUseStoredDataQuery).toHaveBeenCalledWith('AAPL', 'days')
     const group = screen.getByRole('group', { name: /stored tier/i })
     expect(within(group).getByRole('button', { name: /minute/i })).toHaveAttribute('aria-pressed', 'false')
     expect(within(group).getByRole('button', { name: /hourly/i })).toHaveAttribute('aria-pressed', 'false')
@@ -227,7 +227,7 @@ describe('RawDataTable tier selection', () => {
     expect(screen.getByRole('button', { name: /hourly/i })).toHaveAttribute('aria-pressed', 'true')
 
     rerender(<RawDataTable ticker="AAPL" range="all" />)
-    expect(mockedUseStoredDataQuery).toHaveBeenLastCalledWith('AAPL', 'month')
+    expect(mockedUseStoredDataQuery).toHaveBeenLastCalledWith('AAPL', 'days')
   })
 })
 

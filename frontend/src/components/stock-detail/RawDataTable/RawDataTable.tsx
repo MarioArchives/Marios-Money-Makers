@@ -13,11 +13,11 @@ import { useFxRate } from '../../../providers/FxRateProvider/FxRateProvider'
 import { DISPLAY_CURRENCY, convertToGbp, formatCurrency } from '../../../utils/currency'
 import './RawDataTable.css'
 
-/** Human labels for the SQLite tiers (`month` holds daily bars). */
+/** Human labels for the SQLite tiers (`days` holds daily bars). */
 export const TIER_LABELS: Record<StoredTier, string> = {
   minute: 'Minute',
   hour: 'Hourly',
-  month: 'Daily',
+  days: 'Daily',
 }
 
 /**

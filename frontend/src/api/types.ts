@@ -45,17 +45,17 @@ export interface HistoryResponse {
 
 /**
  * SQLite tiers behind `/api/stocks/{ticker}/stored?tier=`. The table names
- * are `bars_<tier>`; note `month` holds *daily* bars (it is the
- * never-pruned long-term tier).
+ * are `bars_<tier>`; `days` holds daily bars and is the never-pruned
+ * long-term tier.
  */
-export const STORED_TIERS = ['minute', 'hour', 'month'] as const
+export const STORED_TIERS = ['minute', 'hour', 'days'] as const
 export type StoredTier = (typeof STORED_TIERS)[number]
 
 /** Which stored tier backs each history range (same mapping as the backend). */
 export const TIER_FOR_RANGE: Record<HistoryRange, StoredTier> = {
   '1d': 'minute',
   '30d': 'hour',
-  all: 'month',
+  all: 'days',
 }
 
 /** One `bars_<tier>` row exactly as stored; `analytics` is the raw Alpaca bar object. */

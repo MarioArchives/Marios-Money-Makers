@@ -309,7 +309,7 @@ class TestFetchBars:
         [
             alpaca_client.TIMEFRAME_MINUTE,
             alpaca_client.TIMEFRAME_HOUR,
-            alpaca_client.TIMEFRAME_MONTH,
+            alpaca_client.TIMEFRAME_DAYS,
         ],
     )
     def test_adjustment_sent_on_every_timeframe_and_honours_config(

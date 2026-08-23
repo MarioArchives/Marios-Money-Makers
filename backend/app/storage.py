@@ -1,7 +1,7 @@
 """SQLite store for fetched market data: history bars, the leaderboard's
-current summaries, fetch stamps and fetch leases.
+current summaries and fetch stamps.
 
-Three tables — ``bars_minute``, ``bars_hour``, ``bars_month`` — with an
+Three tables — ``bars_minute``, ``bars_hour``, ``bars_days`` — with an
 identical schema, one per retention tier:
 
 .. code-block:: sql
@@ -76,35 +76,7 @@ holding an older batch than what is stored is ignored, and re-writing the
 same batch is a no-op. That is what makes the table safe to update from
 several processes sharing one DB file.
 
-A sixth table, ``fetch_claims``, is a lease used for cross-process single
-flight (``try_claim`` / ``release_claim``): before fetching a
-``(tier, ticker)`` from Alpaca a worker inserts a claim row; a competing
-worker's insert conflicts and only succeeds if the existing claim is older
-than the lease, so at most one process fetches a given pair per lease
-window. The claim is deleted as soon as the fetch finishes.
-
-.. code-block:: sql
-
-    CREATE TABLE IF NOT EXISTS fetch_claims (
-        tier       TEXT NOT NULL,
-        ticker     TEXT NOT NULL,
-        claimed_at TEXT NOT NULL,   -- ISO-8601 UTC
-        claim_id   TEXT NOT NULL,   -- fencing token, uuid4 hex
-        PRIMARY KEY (tier, ticker)
-    );
-
-``claim_id`` is a *fencing token*: every successful ``try_claim`` mints a
-fresh ``uuid4().hex`` and stores it on the row (a takeover of an expired
-claim replaces it), and ``release_claim`` deletes the row only when the
-caller's id still matches. Without it a worker that stalled past its
-lease -- so that another worker took the claim over -- would, on
-finishing, delete the *new* holder's claim and let a third worker fetch
-concurrently. With it, a release carrying a superseded id is a silent
-no-op. The column is ``NOT NULL``; a DB whose ``fetch_claims`` predates
-it is simply dropped and recreated by ``init_db`` (claims are ephemeral,
-so nothing of value is lost).
-
-A seventh table, ``meta``, is a tiny key/value store for DB-level
+A sixth table, ``meta``, is a tiny key/value store for DB-level
 bookkeeping (``get_meta`` / ``set_meta``):
 
 .. code-block:: sql
@@ -129,15 +101,28 @@ fresh empty DB just records the mode.
 Another key, ``market_clock`` (:data:`MARKET_CLOCK_META_KEY`), holds the
 latest Alpaca market clock (``GET /v2/clock``) as one JSON blob --
 ``{"timestamp", "is_open", "next_open", "next_close", "fetched_at"}`` --
-written/read via :func:`set_market_clock` / :func:`get_market_clock`. The
-clock fetch is leased under the pseudo-pair ``(CLOCK_TIER, CLOCK_KEY)`` in
-``fetch_claims`` exactly like the bar tiers and ``summaries``, even though
-``CLOCK_TIER`` is deliberately absent from :data:`TIERS` -- there is no
-``bars_clock`` table, only a lease key.
+written/read via :func:`set_market_clock` / :func:`get_market_clock`.
+
+There used to be a seventh table, ``fetch_claims``: a lease row per
+``(tier, ticker)`` that let two backend *processes* sharing one DB file
+agree on which of them fetches a given pair. It was dropped -- this app
+only ever runs as a single uvicorn process (no ``--workers``; the backfill
+sweep is an ``asyncio`` task inside that same process, not a separate
+one), so the lease was pure overhead: two extra write transactions per
+fetch, on top of the in-process ``asyncio.Lock`` that was already the real
+single-flight guarantee for that topology. Dropping it is also safe on the
+merits, not just because the topology never needed it: every write path
+here is conflict-tolerant on its own (``upsert_summaries``'s stamp and
+rows are monotonic on ``fetched_at``; ``upsert_bars`` upserts on its
+``(ticker, ts)`` primary key), so two writers racing without a lease costs
+at most one duplicated Alpaca call, never a corrupt table. ``init_db`` and
+``upsert_summaries`` (see below) still drop a ``fetch_claims`` table left
+behind by an older build of the app -- claims were ephemeral, so nothing
+of value is lost.
 
 Retention: ``prune(now)`` deletes ``bars_minute`` rows whose ``ts`` is
 older than 24 hours and ``bars_hour`` rows older than 30 days (strictly
-older: a row exactly at the cutoff survives). ``bars_month`` is never
+older: a row exactly at the cutoff survives). ``bars_days`` is never
 pruned -- it backs the all-time history view and only ever grows.
 
 ``get_stored_rows`` / ``row_counts`` expose the raw table contents (every
@@ -160,19 +145,18 @@ import json
 import logging
 import os
 import sqlite3  # noqa: F401 - used by the implementation
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from app import config  # noqa: F401 - DB_PATH read at call time
 from app.alpaca_client import Bar, MarketClock
 
 # Tier names; the table for a tier is f"bars_{tier}".
-TIERS = ("minute", "hour", "month")
+TIERS = ("minute", "hour", "days")
 
 # Pseudo-(tier, ticker) under which the leaderboard's whole-universe
-# snapshots fetch is stamped in `fetch_log` and leased in `fetch_claims`.
+# snapshots fetch is stamped in `fetch_log`.
 SUMMARIES_TIER = "summaries"
 SUMMARIES_KEY = "*"
 
@@ -180,15 +164,11 @@ SUMMARIES_KEY = "*"
 BARS_ADJUSTMENT_META_KEY = "bars_adjustment"
 
 # `meta` key under which the latest Alpaca market clock is cached, as one
-# JSON blob (see StoredClock). Pseudo-(tier, ticker) under which the clock
-# fetch is leased in `fetch_claims` -- a lease key only, never a bars
-# table (CLOCK_TIER is in _FETCH_TIERS but deliberately NOT in TIERS).
+# JSON blob (see StoredClock).
 MARKET_CLOCK_META_KEY = "market_clock"
-CLOCK_TIER = "clock"
-CLOCK_KEY = "*"
 
-# Every tier accepted by the fetch_log / fetch_claims helpers.
-_FETCH_TIERS = (*TIERS, SUMMARIES_TIER, CLOCK_TIER)
+# Every tier accepted by the fetch_log helpers.
+_FETCH_TIERS = (*TIERS, SUMMARIES_TIER)
 
 
 @dataclass(frozen=True)
@@ -321,18 +301,10 @@ _CREATE_SUMMARIES_SQL = (
     ")"
 )
 
-FETCH_CLAIMS_TABLE = "fetch_claims"
-_CREATE_FETCH_CLAIMS_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {FETCH_CLAIMS_TABLE} ("
-    "tier TEXT NOT NULL, "
-    "ticker TEXT NOT NULL, "
-    "claimed_at TEXT NOT NULL, "
-    "claim_id TEXT NOT NULL, "
-    "PRIMARY KEY (tier, ticker)"
-    ")"
-)
-# The column whose absence marks a pre-fencing-token `fetch_claims` table.
-_FETCH_CLAIMS_TOKEN_COLUMN = "claim_id"
+# Name of the cross-process fetch-lease table an older build of the app
+# created (see `_drop_legacy_fetch_claims_table`). No longer created by
+# this module -- kept as a bare string, not a real table constant.
+_LEGACY_FETCH_CLAIMS_TABLE = "fetch_claims"
 
 
 META_TABLE = "meta"
@@ -356,30 +328,30 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _ensure_fetch_claims_table(conn: sqlite3.Connection) -> None:
-    """Create ``fetch_claims`` on the current schema, migrating an old one.
+def _drop_legacy_fetch_claims_table(conn: sqlite3.Connection) -> None:
+    """Drop a ``fetch_claims`` table left behind by an older build.
 
-    A DB written before the ``claim_id`` fencing token existed has a
-    ``fetch_claims`` table without that column. Because claims are
-    ephemeral (a row only ever lives for one fetch / one lease window),
-    the correct migration is to drop the old table and recreate it --
-    detected via ``PRAGMA table_info(fetch_claims)``, done once, and a
-    no-op on every later call (the column is then present). Does not
-    commit; the caller does.
+    The cross-process fetch lease was removed (this app only ever runs as
+    a single process, and the write paths are conflict-tolerant on their
+    own -- see the module docstring), so this table is no longer created.
+    A DB file written before the removal may still have it, in either
+    shape it ever had (with or without the ``claim_id`` fencing token
+    column) -- both are simply dropped, never rebuilt: claims were
+    ephemeral (a row only ever lived for one fetch), so nothing of value
+    is lost. Detected via ``sqlite_master`` so this is a no-op -- and logs
+    nothing -- once the table is gone. Does not commit; the caller does.
     """
-    columns = {
-        row[1]
-        for row in conn.execute(f"PRAGMA table_info({FETCH_CLAIMS_TABLE})").fetchall()
-    }
-    if columns and _FETCH_CLAIMS_TOKEN_COLUMN not in columns:
-        conn.execute(f"DROP TABLE IF EXISTS {FETCH_CLAIMS_TABLE}")
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (_LEGACY_FETCH_CLAIMS_TABLE,),
+    ).fetchone()
+    if exists:
+        conn.execute(f"DROP TABLE {_LEGACY_FETCH_CLAIMS_TABLE}")
         logger.info(
-            "storage: %s table predates the %r fencing token column; "
-            "dropped and recreated it (claims are ephemeral)",
-            FETCH_CLAIMS_TABLE,
-            _FETCH_CLAIMS_TOKEN_COLUMN,
+            "storage: dropped legacy %r table (the cross-process fetch "
+            "lease was removed; claims were ephemeral, so nothing is lost)",
+            _LEGACY_FETCH_CLAIMS_TABLE,
         )
-    conn.execute(_CREATE_FETCH_CLAIMS_SQL)
 
 
 def init_db() -> None:
@@ -387,16 +359,16 @@ def init_db() -> None:
 
     Idempotent (``CREATE TABLE IF NOT EXISTS``); called from the app's
     lifespan hook and defensively before writes. The one schema migration
-    it performs is ``fetch_claims`` (see :func:`_ensure_fetch_claims_table`):
-    a pre-``claim_id`` table is dropped and recreated, once.
+    it performs is dropping a legacy ``fetch_claims`` table (see
+    :func:`_drop_legacy_fetch_claims_table`), once.
     """
     Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
+        _drop_legacy_fetch_claims_table(conn)
         for tier in TIERS:
             conn.execute(_create_table_sql(_table(tier)))
         conn.execute(_CREATE_FETCH_LOG_SQL)
         conn.execute(_CREATE_SUMMARIES_SQL)
-        _ensure_fetch_claims_table(conn)
         conn.execute(_CREATE_META_SQL)
         conn.commit()
 
@@ -495,7 +467,7 @@ def upsert_bars(tier: str, ticker: str, bars: list[Bar], recorded_at: str) -> No
     """Insert ``bars`` for ``ticker``, updating on ``(ticker, ts)`` conflict.
 
     A conflicting row always gets its ``price`` and ``analytics`` replaced
-    (the current month's bar keeps mutating until month end, and a live
+    (the current day's bar keeps mutating until the session closes, and a live
     bar's volume keeps growing even between price ticks), but
     ``recorded_at`` only moves when the incoming ``price`` actually differs
     from what is stored -- so ``recorded_at`` tracks "when this price was
@@ -602,7 +574,7 @@ def latest_recorded_at(tier: str, ticker: str) -> str | None:
 def oldest_ts(tier: str, ticker: str) -> str | None:
     """Return ``MIN(ts)`` for ``ticker`` in ``tier``, or None if no rows.
 
-    Used to widen the month tier's Alpaca fetch back to the oldest stored
+    Used to widen the daily tier's Alpaca fetch back to the oldest stored
     daily bar (see ``routers.stocks._fetch_start``) so rows that have aged
     out of the backfill window are still re-checked on every refresh.
     """
@@ -659,7 +631,7 @@ def last_fetch_at(tier: str, ticker: str) -> str | None:
 def prune(now: datetime) -> None:
     """Apply retention: drop minute rows older than 24h and hour rows older than 30d.
 
-    Rows exactly at the cutoff are kept; ``bars_month`` is never touched.
+    Rows exactly at the cutoff are kept; ``bars_days`` is never touched.
     """
     if not os.path.exists(config.DB_PATH):
         return
@@ -776,71 +748,3 @@ def get_summaries() -> dict[str, SummaryRow]:
         for ticker, price, previous_close, currency, error, fetched_at in rows
     }
 
-
-# --- fetch leases (cross-process single flight) -----------------------------
-
-
-def _minus_seconds(ts: str, seconds: float) -> str:
-    dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    return (dt - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def try_claim(tier: str, ticker: str, now_iso: str, lease_seconds: float) -> str | None:
-    """Try to take the fetch lease for ``(tier, ticker)``.
-
-    Returns the new claim's ``claim_id`` (a fresh ``uuid4().hex`` minted
-    here -- the fencing token to hand back to :func:`release_claim`) when
-    the claim is acquired, ``None`` when a live claim held by anyone
-    (including a previous call of our own) blocks it.
-
-    A single upsert: insert the claim, or -- if one exists -- take it over
-    only when it is older than ``lease_seconds`` (``claimed_at <
-    now - lease``), replacing both ``claimed_at`` and ``claim_id``. The
-    claim is ours iff ``rowcount == 1``, i.e. *this* call inserted or
-    refreshed the row.
-    """
-    _validate_fetch_tier(tier)
-    Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    expired_before = _minus_seconds(now_iso, lease_seconds)
-    claim_id = uuid.uuid4().hex
-    with _connect() as conn:
-        _ensure_fetch_claims_table(conn)
-        cursor = conn.execute(
-            f"INSERT INTO {FETCH_CLAIMS_TABLE} (tier, ticker, claimed_at, claim_id) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(tier, ticker) DO UPDATE SET "
-            "claimed_at=excluded.claimed_at, "
-            "claim_id=excluded.claim_id "
-            f"WHERE {FETCH_CLAIMS_TABLE}.claimed_at < ?",
-            (tier, ticker, now_iso, claim_id, expired_before),
-        )
-        claimed = cursor.rowcount == 1
-        conn.commit()
-    return claim_id if claimed else None
-
-
-def release_claim(tier: str, ticker: str, claim_id: str) -> bool:
-    """Drop the fetch lease for ``(tier, ticker)`` if it is still ours.
-
-    Deletes the row only when its ``claim_id`` equals the one returned by
-    the :func:`try_claim` that acquired it. Returns ``True`` iff a row was
-    deleted. A stale or unknown id -- our lease expired and another worker
-    took the claim over, or it was never ours -- is a silent no-op that
-    returns ``False``: a release must never remove someone else's claim.
-    ``claim_id`` is required so no caller can delete by key alone.
-    """
-    _validate_fetch_tier(tier)
-    if not os.path.exists(config.DB_PATH):
-        return False
-    try:
-        with _connect() as conn:
-            cursor = conn.execute(
-                f"DELETE FROM {FETCH_CLAIMS_TABLE} "
-                "WHERE tier = ? AND ticker = ? AND claim_id = ?",
-                (tier, ticker, claim_id),
-            )
-            released = cursor.rowcount == 1
-            conn.commit()
-        return released
-    except sqlite3.OperationalError:
-        return False

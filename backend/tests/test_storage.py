@@ -66,7 +66,7 @@ class TestInitDb:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        assert {"bars_minute", "bars_hour", "bars_month"} <= tables
+        assert {"bars_minute", "bars_hour", "bars_days"} <= tables
 
     def test_is_idempotent(self):
         storage.init_db()
@@ -96,7 +96,7 @@ class TestUpsertBars:
     def test_upsert_updates_instead_of_duplicating(self):
         # Re-fetching an overlapping window must leave exactly one row per
         # (ticker, ts), with price/analytics/recorded_at replaced -- the
-        # current month's bar keeps changing until the month closes.
+        # current day's bar keeps changing until the session closes.
         storage.init_db()
         ts = _iso(NOW - timedelta(minutes=1))
         storage.upsert_bars("minute", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
@@ -123,7 +123,7 @@ class TestUpsertBars:
 
         assert len(_rows("bars_minute")) == 1
         assert _rows("bars_hour") == []
-        assert _rows("bars_month") == []
+        assert _rows("bars_days") == []
 
     def test_creates_tables_defensively_without_prior_init(self):
         # The lifespan hook normally calls init_db, but writes must not
@@ -172,11 +172,11 @@ class TestGetBars:
 class TestStoredRowsAndCounts:
     def test_get_stored_rows_returns_every_column_for_ticker_ordered_by_ts(self):
         t0, t1 = _iso(NOW - timedelta(days=400)), _iso(NOW)
-        storage.upsert_bars("month", "AAPL", [_bar(t1, 101.0)], _iso(NOW))
-        storage.upsert_bars("month", "AAPL", [_bar(t0, 100.0)], _iso(NOW))
-        storage.upsert_bars("month", "MSFT", [_bar(t1, 300.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(t1, 101.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(t0, 100.0)], _iso(NOW))
+        storage.upsert_bars("days", "MSFT", [_bar(t1, 300.0)], _iso(NOW))
 
-        rows = storage.get_stored_rows("month", "AAPL")
+        rows = storage.get_stored_rows("days", "AAPL")
 
         assert [(ts, price) for ts, price, _, _ in rows] == [(t0, 100.0), (t1, 101.0)]
         ts, price, analytics, recorded_at = rows[0]
@@ -204,11 +204,11 @@ class TestStoredRowsAndCounts:
         storage.upsert_bars("hour", "AAPL", [_bar(_iso(NOW), 1.0)], _iso(NOW))
         storage.upsert_bars("hour", "MSFT", [_bar(_iso(NOW), 1.0)], _iso(NOW))
 
-        assert storage.row_counts("AAPL") == {"minute": 2, "hour": 1, "month": 0}
-        assert storage.row_counts("MSFT") == {"minute": 0, "hour": 1, "month": 0}
+        assert storage.row_counts("AAPL") == {"minute": 2, "hour": 1, "days": 0}
+        assert storage.row_counts("MSFT") == {"minute": 0, "hour": 1, "days": 0}
 
     def test_row_counts_all_zero_when_db_missing(self):
-        assert storage.row_counts("AAPL") == {"minute": 0, "hour": 0, "month": 0}
+        assert storage.row_counts("AAPL") == {"minute": 0, "hour": 0, "days": 0}
 
 
 class TestLatestRecordedAt:
@@ -280,14 +280,14 @@ class TestPrune:
         remaining = [r[3] for r in _rows("bars_hour")]
         assert remaining == [_iso(cutoff), _iso(cutoff + timedelta(seconds=1))]
 
-    def test_month_rows_are_never_pruned(self):
+    def test_days_rows_are_never_pruned(self):
         storage.init_db()
         ancient = _iso(NOW - timedelta(days=3650))
-        storage.upsert_bars("month", "AAPL", [_bar(ancient, 12.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(ancient, 12.0)], _iso(NOW))
 
         storage.prune(NOW)
 
-        assert [r[3] for r in _rows("bars_month")] == [ancient]
+        assert [r[3] for r in _rows("bars_days")] == [ancient]
 
     def test_prune_applies_across_all_tickers(self):
         storage.init_db()
@@ -354,7 +354,7 @@ class TestFetchLog:
         assert storage.last_fetch_at("minute", "AAPL") == _iso(NOW)
         assert storage.last_fetch_at("hour", "AAPL") == _iso(NOW - timedelta(hours=1))
         assert storage.last_fetch_at("minute", "MSFT") == _iso(NOW - timedelta(minutes=5))
-        assert storage.last_fetch_at("month", "AAPL") is None
+        assert storage.last_fetch_at("days", "AAPL") is None
 
     def test_record_fetch_upserts_single_row_per_pair(self):
         storage.record_fetch("minute", "AAPL", _iso(NOW - timedelta(minutes=1)))
@@ -488,92 +488,6 @@ class TestEnsureBarsAdjustment:
         assert any("bars adjustment changed" in r.getMessage() for r in caplog.records)
 
 
-class TestFetchClaimsMigration:
-    """`fetch_claims` grew a `claim_id` fencing-token column; a DB on the old
-    schema is dropped and recreated by `init_db` (claims are ephemeral),
-    exactly once, and a DB already on the new schema is left alone."""
-
-    _OLD_SCHEMA = (
-        "CREATE TABLE fetch_claims ("
-        "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
-        "PRIMARY KEY (tier, ticker))"
-    )
-
-    def _columns(self) -> list[str]:
-        with _connect() as conn:
-            return [r[1] for r in conn.execute("PRAGMA table_info(fetch_claims)")]
-
-    def _create_old_schema(self) -> None:
-        Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-        with _connect() as conn:
-            conn.execute(self._OLD_SCHEMA)
-            conn.execute(
-                "INSERT INTO fetch_claims (tier, ticker, claimed_at) VALUES (?, ?, ?)",
-                ("minute", "AAPL", _iso(NOW)),
-            )
-            conn.commit()
-        assert self._columns() == ["tier", "ticker", "claimed_at"]
-
-    def test_old_schema_is_recreated_with_claim_id_on_init_db(self, caplog):
-        self._create_old_schema()
-
-        with caplog.at_level("INFO", logger="app.storage"):
-            storage.init_db()
-
-        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
-        # The old (un-fenced) claim rows are gone; the table is usable.
-        with _connect() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM fetch_claims").fetchone()[0] == 0
-        assert any(
-            "fetch_claims" in r.getMessage() and "claim_id" in r.getMessage()
-            for r in caplog.records
-        )
-        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
-        assert isinstance(claim_id, str) and len(claim_id) == 32
-
-    def test_migration_happens_once(self, caplog):
-        self._create_old_schema()
-        storage.init_db()
-        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
-        assert claim_id is not None
-
-        with caplog.at_level("INFO", logger="app.storage"):
-            storage.init_db()  # already on the new schema: must not drop again
-
-        assert not any("dropped and recreated" in r.getMessage() for r in caplog.records)
-        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
-        with _connect() as conn:
-            rows = conn.execute(
-                "SELECT tier, ticker, claimed_at, claim_id FROM fetch_claims"
-            ).fetchall()
-        assert rows == [("minute", "AAPL", _iso(NOW), claim_id)]
-
-    def test_new_schema_db_is_untouched(self):
-        storage.init_db()
-        claim_id = storage.try_claim("hour", "MSFT", _iso(NOW), 10)
-        assert claim_id is not None
-
-        storage.init_db()
-
-        with _connect() as conn:
-            rows = conn.execute(
-                "SELECT tier, ticker, claimed_at, claim_id FROM fetch_claims"
-            ).fetchall()
-        assert rows == [("hour", "MSFT", _iso(NOW), claim_id)]
-        # And the live claim still blocks a competitor / releases with its id.
-        assert storage.try_claim("hour", "MSFT", _iso(NOW), 10) is None
-        assert storage.release_claim("hour", "MSFT", claim_id) is True
-
-    def test_try_claim_also_migrates_an_old_table_defensively(self):
-        # `try_claim` runs the same ensure step (no prior init_db).
-        self._create_old_schema()
-
-        claim_id = storage.try_claim("minute", "AAPL", _iso(NOW), 10)
-
-        assert isinstance(claim_id, str) and len(claim_id) == 32
-        assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
-
-
 class TestUpsertBarsRecordedAtGating:
     """``recorded_at`` means "when this price was last recorded": a
     re-upsert that brings the same price leaves the stamp alone (price and
@@ -583,16 +497,16 @@ class TestUpsertBarsRecordedAtGating:
 
     def test_new_row_is_stamped_with_the_given_recorded_at(self):
         storage.init_db()
-        storage.upsert_bars("month", "AAPL", [_bar(_iso(NOW), 100.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(_iso(NOW), 100.0)], _iso(NOW))
 
-        rows = _rows("bars_month")
+        rows = _rows("bars_days")
         assert len(rows) == 1
         assert rows[0][4] == _iso(NOW)
 
     def test_same_price_keeps_recorded_at_but_refreshes_analytics(self):
         storage.init_db()
         ts = _iso(NOW - timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
 
         later = _iso(NOW + timedelta(days=1))
         same_price_more_volume = Bar(
@@ -602,9 +516,9 @@ class TestUpsertBarsRecordedAtGating:
                 {"o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 999, "vw": 100.0, "n": 9}
             ),
         )
-        storage.upsert_bars("month", "AAPL", [same_price_more_volume], later)
+        storage.upsert_bars("days", "AAPL", [same_price_more_volume], later)
 
-        rows = _rows("bars_month")
+        rows = _rows("bars_days")
         assert len(rows) == 1
         _, price, analytics, _, recorded_at = rows[0]
         assert price == pytest.approx(100.0)
@@ -614,12 +528,12 @@ class TestUpsertBarsRecordedAtGating:
     def test_changed_price_replaces_price_analytics_and_recorded_at(self):
         storage.init_db()
         ts = _iso(NOW - timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(ts, 200.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(ts, 200.0)], _iso(NOW))
 
         later = _iso(NOW + timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(ts, 50.0)], later)  # 4:1 split
+        storage.upsert_bars("days", "AAPL", [_bar(ts, 50.0)], later)  # 4:1 split
 
-        rows = _rows("bars_month")
+        rows = _rows("bars_days")
         assert len(rows) == 1
         _, price, analytics, _, recorded_at = rows[0]
         assert price == pytest.approx(50.0)
@@ -630,12 +544,12 @@ class TestUpsertBarsRecordedAtGating:
         storage.init_db()
         t0 = _iso(NOW - timedelta(days=2))
         t1 = _iso(NOW - timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(t0, 100.0), _bar(t1, 101.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(t0, 100.0), _bar(t1, 101.0)], _iso(NOW))
 
         later = _iso(NOW + timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(t0, 100.0), _bar(t1, 202.0)], later)
+        storage.upsert_bars("days", "AAPL", [_bar(t0, 100.0), _bar(t1, 202.0)], later)
 
-        by_ts = {row[3]: row for row in _rows("bars_month")}
+        by_ts = {row[3]: row for row in _rows("bars_days")}
         assert by_ts[t0][4] == _iso(NOW)
         assert by_ts[t1][4] == later
         assert by_ts[t1][1] == pytest.approx(202.0)
@@ -655,28 +569,28 @@ class TestOldestTs:
         storage.init_db()
         t0 = _iso(NOW - timedelta(days=3 * 365))
         t1 = _iso(NOW - timedelta(days=1))
-        storage.upsert_bars("month", "AAPL", [_bar(t1, 1.0), _bar(t0, 1.0)], _iso(NOW))
-        storage.upsert_bars("month", "MSFT", [_bar(_iso(NOW - timedelta(days=9 * 365)), 1.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(t1, 1.0), _bar(t0, 1.0)], _iso(NOW))
+        storage.upsert_bars("days", "MSFT", [_bar(_iso(NOW - timedelta(days=9 * 365)), 1.0)], _iso(NOW))
         storage.upsert_bars("hour", "AAPL", [_bar(_iso(NOW - timedelta(days=20)), 1.0)], _iso(NOW))
 
-        assert storage.oldest_ts("month", "AAPL") == t0
+        assert storage.oldest_ts("days", "AAPL") == t0
         assert storage.oldest_ts("hour", "AAPL") == _iso(NOW - timedelta(days=20))
 
     def test_none_when_no_rows_for_ticker(self):
         storage.init_db()
-        storage.upsert_bars("month", "MSFT", [_bar(_iso(NOW), 1.0)], _iso(NOW))
-        assert storage.oldest_ts("month", "AAPL") is None
+        storage.upsert_bars("days", "MSFT", [_bar(_iso(NOW), 1.0)], _iso(NOW))
+        assert storage.oldest_ts("days", "AAPL") is None
 
     def test_none_when_db_missing(self):
-        assert storage.oldest_ts("month", "AAPL") is None
+        assert storage.oldest_ts("days", "AAPL") is None
 
     def test_none_when_table_missing(self):
         # DB file exists (fetch_log only), bar table for the tier does not.
         storage.record_fetch("summaries", "*", _iso(NOW))
         with _connect() as conn:
-            conn.execute("DROP TABLE IF EXISTS bars_month")
+            conn.execute("DROP TABLE IF EXISTS bars_days")
             conn.commit()
-        assert storage.oldest_ts("month", "AAPL") is None
+        assert storage.oldest_ts("days", "AAPL") is None
 
     def test_rejects_unknown_tier(self):
         with pytest.raises(ValueError):
@@ -774,43 +688,194 @@ class TestMarketClockMeta:
         assert count == 2
 
 
-class TestClockLease:
-    """The clock fetch takes the same cross-process lease as the summaries
-    batch, under the pseudo-pair (CLOCK_TIER, CLOCK_KEY) -- which is a lease
-    key only, never a bars table."""
+EXPECTED_TABLES = {
+    "bars_minute",
+    "bars_hour",
+    "bars_days",
+    "fetch_log",
+    "summaries",
+    "meta",
+}
 
-    def test_clock_pseudo_pair_constants(self):
-        assert storage.CLOCK_TIER == "clock"
-        assert storage.CLOCK_KEY == "*"
-        assert storage.CLOCK_TIER not in storage.TIERS
 
-    def test_clock_pair_can_be_leased_and_released(self):
-        claim_id = storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10)
-        assert claim_id is not None
-        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is None
-        assert storage.release_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, claim_id) is True
-        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is not None
+def _tables() -> set[str]:
+    with _connect() as conn:
+        return {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
 
-    def test_clock_lease_is_independent_of_the_summaries_lease(self):
-        summaries_claim = storage.try_claim("summaries", "*", _iso(NOW), 10)
-        assert summaries_claim is not None
-        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is not None
 
-    def test_clock_is_not_a_bars_tier(self):
-        storage.init_db()
+class TestLegacyFetchClaimsDropped:
+    """`fetch_claims` (the cross-process fetch lease) was removed. A DB file
+    written by an older build still has the table; `init_db` drops it once.
+    Claims were ephemeral -- a row only ever lived for one fetch -- so there
+    is nothing to preserve, and leaving a dead table behind would be a
+    straggler."""
+
+    _CURRENT_SCHEMA = (
+        "CREATE TABLE fetch_claims ("
+        "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
+        "claim_id TEXT NOT NULL, PRIMARY KEY (tier, ticker))"
+    )
+    # The even older shape, before the claim_id fencing token existed.
+    _PRE_TOKEN_SCHEMA = (
+        "CREATE TABLE fetch_claims ("
+        "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
+        "PRIMARY KEY (tier, ticker))"
+    )
+
+    def _seed(self, schema: str) -> None:
+        # IF NOT EXISTS / INSERT OR REPLACE so the helper works whether or
+        # not the table is already there (today `init_db` still creates it).
+        Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         with _connect() as conn:
-            tables = {
-                row[0]
-                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-        assert "bars_clock" not in tables
-        with pytest.raises(ValueError):
-            storage.upsert_bars("clock", "*", [], _iso(NOW))
-        with pytest.raises(ValueError):
-            storage.oldest_ts("clock", "*")
+            conn.execute(schema.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "))
+            if "claim_id" in schema:
+                conn.execute(
+                    "INSERT OR REPLACE INTO fetch_claims VALUES (?, ?, ?, ?)",
+                    ("minute", "AAPL", _iso(NOW), "f" * 32),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO fetch_claims VALUES (?, ?, ?)",
+                    ("minute", "AAPL", _iso(NOW)),
+                )
+            conn.commit()
+        assert "fetch_claims" in _tables()
 
-    def test_unknown_tier_still_rejected_by_lease_helpers(self):
+    def test_current_schema_table_is_dropped_by_init_db(self):
+        self._seed(self._CURRENT_SCHEMA)
+
+        storage.init_db()
+
+        assert "fetch_claims" not in _tables()
+
+    def test_pre_fencing_token_table_is_dropped_too(self):
+        # The old drop-and-recreate migration must not survive in any form:
+        # this table is removed, not rebuilt with a claim_id column.
+        self._seed(self._PRE_TOKEN_SCHEMA)
+
+        storage.init_db()
+
+        assert "fetch_claims" not in _tables()
+
+    def test_drop_leaves_every_other_table_and_its_rows_intact(self):
+        storage.init_db()
+        storage.upsert_bars("minute", "AAPL", [_bar(_iso(NOW), 100.0)], _iso(NOW))
+        storage.upsert_bars("days", "AAPL", [_bar(_iso(NOW), 101.0)], _iso(NOW))
+        storage.record_fetch("minute", "AAPL", _iso(NOW))
+        storage.upsert_summaries(
+            [
+                storage.SummaryRow(
+                    ticker="AAPL",
+                    price=100.0,
+                    previous_close=90.0,
+                    currency="USD",
+                    error=None,
+                )
+            ],
+            _iso(NOW),
+        )
+        storage.set_meta("bars_adjustment", "split")
+        self._seed(self._CURRENT_SCHEMA)
+
+        storage.init_db()
+
+        assert _tables() == EXPECTED_TABLES
+        assert len(_rows("bars_minute")) == 1
+        assert len(_rows("bars_days")) == 1
+        assert storage.last_fetch_at("minute", "AAPL") == _iso(NOW)
+        assert storage.get_summaries()["AAPL"].price == 100.0
+        assert storage.get_meta("bars_adjustment") == "split"
+
+    def test_drop_is_idempotent_and_logs_once(self, caplog):
+        self._seed(self._CURRENT_SCHEMA)
+
+        with caplog.at_level("INFO", logger="app.storage"):
+            storage.init_db()
+            first = [r.getMessage() for r in caplog.records if "fetch_claims" in r.getMessage()]
+            caplog.clear()
+            storage.init_db()
+            second = [r.getMessage() for r in caplog.records if "fetch_claims" in r.getMessage()]
+
+        assert len(first) == 1
+        assert "drop" in first[0].lower()
+        assert second == []
+        assert "fetch_claims" not in _tables()
+
+    def test_fresh_db_has_the_expected_tables_and_no_fetch_claims(self):
+        storage.init_db()
+
+        assert _tables() == EXPECTED_TABLES
+
+
+class TestLeaseApiIsGone:
+    """The lease helpers and their pseudo-tier are removed outright, so a
+    half-finished removal fails loudly rather than leaving dead code."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "try_claim",
+            "release_claim",
+            "FETCH_CLAIMS_TABLE",
+            "_ensure_fetch_claims_table",
+            "CLOCK_TIER",
+            "CLOCK_KEY",
+        ],
+    )
+    def test_storage_no_longer_exposes(self, name):
+        assert not hasattr(storage, name)
+
+    def test_config_has_no_fetch_lease_setting(self):
+        assert not hasattr(config, "FETCH_LEASE_SECONDS")
+
+    def test_fetch_log_helpers_reject_the_clock_pseudo_tier(self):
+        # `clock` was only ever a lease key -- the clock lives in `meta`.
         with pytest.raises(ValueError):
-            storage.try_claim("weekly", "AAPL", _iso(NOW), 10)
+            storage.record_fetch("clock", "*", _iso(NOW))
         with pytest.raises(ValueError):
-            storage.release_claim("weekly", "AAPL", "abc")
+            storage.last_fetch_at("clock", "*")
+
+    def test_fetch_log_helpers_still_accept_the_real_tiers(self):
+        for tier in (*storage.TIERS, storage.SUMMARIES_TIER):
+            storage.record_fetch(tier, "AAPL", _iso(NOW))
+            assert storage.last_fetch_at(tier, "AAPL") == _iso(NOW)
+        with pytest.raises(ValueError):
+            storage.record_fetch("weekly", "AAPL", _iso(NOW))
+
+
+class TestConcurrentWritersConverge:
+    """Why dropping the lease is safe: the write paths were already
+    conflict-tolerant on their own. Two writers racing costs at most one
+    duplicated Alpaca call -- never a corrupt table."""
+
+    def test_an_older_summaries_batch_never_overwrites_a_newer_one(self):
+        storage.init_db()
+        newer = _iso(NOW)
+        older = _iso(NOW - timedelta(seconds=30))
+
+        def row(price: float) -> storage.SummaryRow:
+            return storage.SummaryRow(
+                ticker="AAPL",
+                price=price,
+                previous_close=90.0,
+                currency="USD",
+                error=None,
+            )
+
+        storage.upsert_summaries([row(100.0)], newer)
+        storage.upsert_summaries([row(50.0)], older)  # the slow writer lands late
+
+        assert storage.get_summaries()["AAPL"].price == 100.0
+        assert storage.last_fetch_at(storage.SUMMARIES_TIER, storage.SUMMARIES_KEY) == newer
+
+    def test_duplicate_bar_upserts_leave_exactly_one_row(self):
+        storage.init_db()
+        ts = _iso(NOW)
+
+        storage.upsert_bars("minute", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
+        storage.upsert_bars("minute", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
+
+        assert len(_rows("bars_minute")) == 1

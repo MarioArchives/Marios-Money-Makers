@@ -89,7 +89,7 @@ RATE_LIMIT_ERROR_PREFIX = "alpaca rate limited"
 # Alpaca timeframe strings for the three storage tiers.
 TIMEFRAME_MINUTE = "1Min"
 TIMEFRAME_HOUR = "1Hour"
-TIMEFRAME_MONTH = "1Day"
+TIMEFRAME_DAYS = "1Day"
 
 # Test seam: when set (an ``httpx.BaseTransport``, e.g. ``httpx.MockTransport``),
 # `_client()` builds its ``httpx.Client`` on top of it so tests exercise the

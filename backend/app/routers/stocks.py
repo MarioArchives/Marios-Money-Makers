@@ -11,18 +11,14 @@ Three endpoints:
   otherwise ONE worker refreshes it via
   :func:`app.alpaca_client.fetch_summaries` (one snapshots request for the
   full universe, run in a worker thread) and writes all 20 rows + the
-  stamp atomically. Single flight is guaranteed in-process by the
-  ``"summaries"`` entry of ``_refresh_locks`` (double-checked freshness
-  after acquiring) and across processes sharing the DB by a lease row in
-  ``fetch_claims`` (:func:`app.storage.try_claim`, ``FETCH_LEASE_SECONDS``):
-  a process that finds the lease held simply serves the table. The claim
-  is a fencing token: ``try_claim`` hands back a ``claim_id`` and the
-  ``finally`` release passes it to :func:`app.storage.release_claim`,
-  which only deletes a row carrying that same id -- so a worker that
-  overran its lease and was superseded cannot delete the new holder's
-  claim when it eventually finishes. Net effect:
+  stamp atomically. Single flight is guaranteed by the ``"summaries"``
+  entry of ``_refresh_locks``, an in-process ``asyncio.Lock`` with
+  double-checked freshness after acquiring -- this app only ever runs as
+  one process, so that lock alone is the whole guarantee; there used to
+  also be a cross-process lease row in a ``fetch_claims`` table, removed
+  because nothing here ever runs as more than one process. Net effect:
   one Alpaca snapshots call per ``CACHE_TTL_SECONDS`` window per database,
-  however many requests or processes arrive, and the last good leaderboard
+  however many requests arrive concurrently, and the last good leaderboard
   survives a restart. ``change``/``change_percent`` are derived on read.
   Never 500s on partial per-ticker failure — those entries simply carry
   ``is_stale=True``/``error`` (and are stored as error rows). Each
@@ -56,15 +52,10 @@ Three endpoints:
   viewing a chart; a request that lands on a pair the sweep has just
   refreshed is simply a fresh DB read.
 
-  ``refresh_history`` also takes the per-pair ``fetch_claims`` lease, so
-  two processes sharing one DB never fetch the same pair at once either
-  (a caller that finds the lease held returns without fetching), and
-  releases it with the same ``claim_id`` fencing token.
-
   ``all`` is the all-time view: the daily tier is never pruned, so the
   response carries *every* stored daily bar for the ticker (no time
   window on the read). The Alpaca fetch is bounded to
-  ``MONTH_BACKFILL_DAYS`` on the first fetch, but on every later refresh it
+  ``DAY_BACKFILL_DAYS`` on the first fetch, but on every later refresh it
   also reaches back to the oldest stored daily bar (:func:`_fetch_start`),
   so a row that has aged out of that window is still re-checked -- no
   straggler is left behind un-refreshed, and a split that re-adjusts old
@@ -72,7 +63,7 @@ Three endpoints:
   even a multi-year reach-back (252 bars/year, 1000 bars per Alpaca page).
   The series therefore grows by one bar per trading day for as long as the
   store lives.
-- ``GET /api/stocks/{ticker}/stored?tier=minute|hour|month`` — raw
+- ``GET /api/stocks/{ticker}/stored?tier=minute|hour|days`` — raw
   inspection of the SQLite store for one ticker: every row of the tier's
   table (all columns, ``analytics`` JSON parsed, no time window, oldest
   first), the row count per tier and the tier's last successful Alpaca
@@ -87,9 +78,9 @@ last good rows and blank the page. So :func:`_get_summaries_batch`:
 
 1. Treats a batch in which *every* summary carries an ``error`` as a total
    failure: nothing is written (the ``summaries`` table and its stamp keep
-   the last known-good batch), the lease is released and the failure is
-   recorded ONCE -- by the leader only. Waiters queued on the lock re-check
-   backoff after acquiring it and must not retry.
+   the last known-good batch), and the failure is recorded ONCE -- by the
+   leader only. Waiters queued on the lock re-check backoff after
+   acquiring it and must not retry.
 2. Serves, in order of preference: the ``summaries`` table flagged
    ``is_stale=True`` (price AND previous_close/change preserved); the
    last error-flagged batch (``_backoff.last_failed_batch``); an
@@ -100,7 +91,7 @@ last good rows and blank the page. So :func:`_get_summaries_batch`:
    every request serves the table stale, zero Alpaca calls. Reset on the
    first successful batch.
 4. Caps every Alpaca request at ``ALPACA_TIMEOUT_SECONDS`` so a hung
-   request can never outlive the fetch lease (``FETCH_LEASE_SECONDS``).
+   request can never stall the single in-process lock indefinitely.
 
 """
 
@@ -115,7 +106,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 
-from app import alpaca_client, config, storage
+from app import alpaca_client, storage
 from app.alpaca_client import Bar
 from app.config import (
     BACKOFF_BASE_SECONDS,
@@ -123,10 +114,10 @@ from app.config import (
     CACHE_TTL_SECONDS,
     FRESHNESS_HOUR_SECONDS,
     FRESHNESS_MINUTE_SECONDS,
-    FRESHNESS_MONTH_SECONDS,
+    FRESHNESS_DAY_SECONDS,
     HOUR_RETENTION_DAYS,
     MINUTE_RETENTION_HOURS,
-    MONTH_BACKFILL_DAYS,
+    DAY_BACKFILL_DAYS,
 )
 from app.schemas import (
     HistoryPoint,
@@ -148,8 +139,8 @@ router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 # refresh state is `_refresh_locks`: one asyncio.Lock per key --
 # `SUMMARIES_LOCK_KEY` for the leaderboard batch, "{ticker}:{tier}" per
 # history pair -- collapsing concurrent cache-miss refreshes in this
-# process into one fetch. Cross-process single flight is the DB's
-# `fetch_claims` lease (see `storage.try_claim`).
+# process into one fetch. That lock is the whole single-flight guarantee:
+# this app only ever runs as a single process (no cross-process lease).
 SUMMARIES_LOCK_KEY = "summaries"
 _refresh_locks: dict[str, asyncio.Lock] = {}
 
@@ -180,11 +171,11 @@ _TIER_BY_RANGE: dict[str, tuple[str, str, timedelta, float, str]] = {
         "1h",
     ),
     "all": (
-        "month",
-        alpaca_client.TIMEFRAME_MONTH,
-        timedelta(days=MONTH_BACKFILL_DAYS),
-        FRESHNESS_MONTH_SECONDS,
-        # TIMEFRAME_MONTH == "1Day": the "month" tier's individual bars are
+        "days",
+        alpaca_client.TIMEFRAME_DAYS,
+        timedelta(days=DAY_BACKFILL_DAYS),
+        FRESHNESS_DAY_SECONDS,
+        # TIMEFRAME_DAYS == "1Day": the "days" tier's individual bars are
         # daily (it is never pruned, unlike the "hour" tier), so the
         # response's interval label is "1d", not "1mo".
         "1d",
@@ -207,9 +198,9 @@ HistoryRange = Literal["1d", "30d", "all"]
 # `_fetch_start`: the same tiers get their Alpaca fetch widened back to the
 # oldest stored row, so nothing served by the unbounded read is ever left
 # un-refreshed.
-_UNBOUNDED_READ_TIERS = frozenset({"month"})
+_UNBOUNDED_READ_TIERS = frozenset({"days"})
 
-StoredTier = Literal["minute", "hour", "month"]
+StoredTier = Literal["minute", "hour", "days"]
 
 # Clocks, indirected through module globals so tests can substitute fakes:
 # `_monotonic` drives backoff windows, `_utcnow` drives freshness checks
@@ -406,16 +397,14 @@ async def refresh_history(ticker: str, tier: str) -> bool:
     ``_refresh_locks`` (collapsing concurrent refreshes in this process
     into one fetch), re-checks ``fetch_log`` freshness inside the lock
     (returns ``False`` with zero Alpaca calls if another task already
-    refreshed), takes the pair's cross-process lease in ``fetch_claims``
-    (returns ``False`` without fetching if another process holds it), then
-    runs :func:`app.alpaca_client.fetch_bars` in a worker thread -- it is a
-    blocking httpx call, and must not stall the event loop for the other
-    requests (or the sweep) -- and upserts the bars, stamps ``fetch_log``
-    and prunes. The lease is released in all cases once the fetch is over.
-    Returns ``True`` when a fetch happened.
+    refreshed), then runs :func:`app.alpaca_client.fetch_bars` in a worker
+    thread -- it is a blocking httpx call, and must not stall the event
+    loop for the other requests (or the sweep) -- and upserts the bars,
+    stamps ``fetch_log`` and prunes. Returns ``True`` when a fetch
+    happened.
 
     The fetch's ``start`` comes from :func:`_fetch_start`, not a plain
-    ``now - window``: for the never-pruned month tier it reaches back to
+    ``now - window``: for the never-pruned daily tier it reaches back to
     the oldest stored daily bar so no row is left un-refreshed once it ages
     past the ordinary backfill window.
 
@@ -437,25 +426,15 @@ async def refresh_history(ticker: str, tier: str) -> bool:
             return False
 
         now = _utcnow()
-        claim_id = storage.try_claim(tier, ticker, _iso(now), config.FETCH_LEASE_SECONDS)
-        if claim_id is None:
-            # Another process is fetching this pair right now; its write
-            # will land in the shared DB. Serve what we have.
-            return False
-        try:
-            start = _fetch_start(tier, ticker, window, now)
-            bars = await asyncio.to_thread(
-                alpaca_client.fetch_bars, ticker, timeframe, start
-            )
+        start = _fetch_start(tier, ticker, window, now)
+        bars = await asyncio.to_thread(
+            alpaca_client.fetch_bars, ticker, timeframe, start
+        )
 
-            recorded_at = _iso(now)
-            storage.upsert_bars(tier, ticker, bars, recorded_at=recorded_at)
-            storage.record_fetch(tier, ticker, _iso(_utcnow()))
-            storage.prune(_utcnow())
-        finally:
-            # Fenced by our claim_id: if we overran the lease and another
-            # worker took the claim over, this is a no-op, not a theft.
-            storage.release_claim(tier, ticker, claim_id)
+        recorded_at = _iso(now)
+        storage.upsert_bars(tier, ticker, bars, recorded_at=recorded_at)
+        storage.record_fetch(tier, ticker, _iso(_utcnow()))
+        storage.prune(_utcnow())
         return True
 
 
@@ -637,15 +616,14 @@ async def _get_summaries_batch() -> dict[str, StockSummary]:
     2. Backoff active -> serve the table stale, zero Alpaca calls.
     3. Take the in-process ``SUMMARIES_LOCK_KEY`` lock, re-check 1 and 2
        (a leader that just refreshed or just failed settles it for every
-       waiter), then take the cross-process ``fetch_claims`` lease; a held
-       lease means another process is fetching -> serve the table as-is.
+       waiter).
     4. Fetch in a worker thread. Total failure -> record ONE backoff
        failure, write nothing, serve the table stale. Success -> write all
        rows + stamp atomically, persist minute bars (best-effort), reset
-       backoff, return the fresh batch. The lease is always released.
+       backoff, return the fresh batch.
 
     Never raises for Alpaca reasons (``fetch_summaries`` never does);
-    anything unexpected propagates after releasing the lease and lock.
+    anything unexpected propagates after releasing the lock.
     """
     if _is_summaries_fresh():
         fresh = _batch_from_table(stale=False)
@@ -665,38 +643,22 @@ async def _get_summaries_batch() -> dict[str, StockSummary]:
         if _backoff.is_blocked():
             return _stale_fallback()
 
-        now = _utcnow()
-        claim_id = storage.try_claim(
-            SUMMARIES_TIER, SUMMARIES_KEY, _iso(now), config.FETCH_LEASE_SECONDS
+        summaries, minute_bars = await asyncio.to_thread(
+            alpaca_client.fetch_summaries, TICKER_SYMBOLS
         )
-        if claim_id is None:
-            # Another process holds the lease: it is fetching into the
-            # shared table right now. Serve the table as-is; it may even
-            # have landed fresh since our check above.
-            table = _batch_from_table(stale=not _is_summaries_fresh())
-            return table if table is not None else _stale_fallback()
+        if _is_total_failure(summaries):
+            # Write nothing: the table keeps the last known-good rows.
+            _backoff.record_failure(summaries)
+            return _stale_fallback()
 
+        fetched_at = _iso(_utcnow())
         try:
-            summaries, minute_bars = await asyncio.to_thread(
-                alpaca_client.fetch_summaries, TICKER_SYMBOLS
-            )
-            if _is_total_failure(summaries):
-                # Write nothing: the table keeps the last known-good rows.
-                _backoff.record_failure(summaries)
-                return _stale_fallback()
-
-            fetched_at = _iso(_utcnow())
-            try:
-                storage.upsert_summaries(_summary_rows(summaries), fetched_at)
-            except Exception:  # noqa: BLE001 - the DB is a backup; serve the data
-                logger.exception("summaries: failed to store the fetched batch")
-            _persist_minute_bars(minute_bars, fetched_at)
-            _backoff.record_success()
-            return summaries
-        finally:
-            # Fenced by our claim_id: a release after another process took
-            # the expired lease over is a no-op (its claim stays in place).
-            storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY, claim_id)
+            storage.upsert_summaries(_summary_rows(summaries), fetched_at)
+        except Exception:  # noqa: BLE001 - the DB is a backup; serve the data
+            logger.exception("summaries: failed to store the fetched batch")
+        _persist_minute_bars(minute_bars, fetched_at)
+        _backoff.record_success()
+        return summaries
 
 
 async def refresh_summaries() -> None:

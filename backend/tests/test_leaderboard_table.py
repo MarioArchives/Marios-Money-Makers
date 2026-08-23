@@ -1,6 +1,11 @@
 """Tests for the DB-first leaderboard: the `summaries` table, its `fetch_log`
-stamp, the `fetch_claims` lease and the single-flight refresh in
+stamp and the single-flight refresh in
 `app.routers.stocks._get_summaries_batch`.
+
+Single flight is the in-process `asyncio.Lock` alone -- the `fetch_claims`
+cross-process lease was removed, so these tests also pin that no lease row
+or table is created, and that a legacy one left in an old DB file is
+dropped rather than honoured.
 
 Unlike `tests/test_stocks_router.py` (which mocks `fetch_summaries` at the
 router's call site), these tests drive the REAL `app.alpaca_client` over an
@@ -10,7 +15,7 @@ mocked: every test gets its own tmp-path SQLite DB. Router module state
 (`_refresh_locks`, `_backoff`) is reset per test; a "process restart" is
 simulated by resetting it again mid-test while keeping the DB file.
 
-Clocks: `fake_utcnow` drives TTL / lease arithmetic (`stocks._utcnow`),
+Clocks: `fake_utcnow` drives TTL / freshness arithmetic (`stocks._utcnow`),
 `fake_clock` drives backoff windows (`stocks._monotonic`). Nothing sleeps
 except the deliberate `time.sleep` inside the slow transport used to hold
 a leader "in flight" while a burst of waiters queues behind it.
@@ -33,7 +38,7 @@ import app.backfill as backfill
 import app.routers.stocks as stocks_router
 from app import alpaca_client, config, storage
 from app.alpaca_client import AlpacaError
-from app.config import CACHE_TTL_SECONDS, FETCH_LEASE_SECONDS
+from app.config import CACHE_TTL_SECONDS
 from app.main import app
 from app.storage import SUMMARIES_KEY, SUMMARIES_TIER, SummaryRow
 from app.tickers import TICKER_SYMBOLS
@@ -184,24 +189,35 @@ def _row_count(table: str) -> int:
         conn.close()
 
 
-def _claim_rows() -> list[tuple[str, str, str]]:
+def _table_exists(name: str) -> bool:
     conn = sqlite3.connect(config.DB_PATH)
     try:
-        return conn.execute(
-            "SELECT tier, ticker, claimed_at FROM fetch_claims ORDER BY tier, ticker"
-        ).fetchall()
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (name,)
+        ).fetchone()
     finally:
         conn.close()
+    return row is not None
 
 
-def _claim_ids() -> dict[tuple[str, str], str]:
-    """``{(tier, ticker): claim_id}`` for every live claim row."""
+def _seed_legacy_claim_table(tier: str, ticker: str, claimed_at: str) -> None:
+    """Recreate the dropped `fetch_claims` table with one live claim row, as
+    an older build of the app would have left it in the DB file."""
     conn = sqlite3.connect(config.DB_PATH)
     try:
-        rows = conn.execute("SELECT tier, ticker, claim_id FROM fetch_claims").fetchall()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fetch_claims ("
+            "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
+            "claim_id TEXT NOT NULL, PRIMARY KEY (tier, ticker))"
+        )
+        conn.execute(
+            "INSERT INTO fetch_claims (tier, ticker, claimed_at, claim_id) "
+            "VALUES (?, ?, ?, ?)",
+            (tier, ticker, claimed_at, "f" * 32),
+        )
+        conn.commit()
     finally:
         conn.close()
-    return {(tier, ticker): claim_id for tier, ticker, claim_id in rows}
 
 
 async def _burst(n: int, path: str = "/api/stocks") -> list[httpx.Response]:
@@ -299,8 +315,8 @@ class TestFreshness:
         assert alpaca.snapshot_calls == 1
         assert _row_count("summaries") == 20
         assert _row_count("bars_minute") == 20
-        # A successful fetch leaves no lease behind.
-        assert _claim_rows() == []
+        # No lease table is created or needed by a refresh.
+        assert not _table_exists("fetch_claims")
 
 
 class TestSingleFlight:
@@ -363,8 +379,8 @@ class TestSingleFlight:
         # Nothing was written over the good rows or the stamp.
         assert storage.get_summaries()["AAPL"].price == pytest.approx(50.0)
         assert _stamp() == _iso(NOW - timedelta(seconds=CACHE_TTL_SECONDS + 1))
-        # The lease was released despite the failure.
-        assert _claim_rows() == []
+        # No lease table is created by a failed refresh either.
+        assert not _table_exists("fetch_claims")
 
     def test_requests_during_backoff_serve_table_stale_without_alpaca(
         self, alpaca, client, fake_utcnow, fake_clock
@@ -469,229 +485,6 @@ class TestLateWriter:
         assert _stamp() is None
 
 
-_HEX = "0123456789abcdef"
-
-
-def _is_claim_id(value: object) -> bool:
-    """A `try_claim` fencing token: 32 lowercase hex chars (``uuid4().hex``)."""
-    return isinstance(value, str) and len(value) == 32 and all(c in _HEX for c in value)
-
-
-class TestLease:
-    def test_try_claim_once_then_blocked_until_expiry(self):
-        now = _iso(NOW)
-        first = storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, now, FETCH_LEASE_SECONDS)
-        assert _is_claim_id(first)
-        assert (
-            storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, now, FETCH_LEASE_SECONDS)
-            is None
-        )
-        inside = _iso(NOW + timedelta(seconds=FETCH_LEASE_SECONDS - 1))
-        assert (
-            storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, inside, FETCH_LEASE_SECONDS)
-            is None
-        )
-        expired = _iso(NOW + timedelta(seconds=FETCH_LEASE_SECONDS + 1))
-        second = storage.try_claim(
-            SUMMARIES_TIER, SUMMARIES_KEY, expired, FETCH_LEASE_SECONDS
-        )
-        # A takeover mints a NEW fencing token ...
-        assert _is_claim_id(second)
-        assert second != first
-        # ... and refreshes the stamp: it is held again from `expired`.
-        assert _claim_rows() == [(SUMMARIES_TIER, SUMMARIES_KEY, expired)]
-        assert _claim_ids() == {(SUMMARIES_TIER, SUMMARIES_KEY): second}
-        assert (
-            storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, expired, FETCH_LEASE_SECONDS)
-            is None
-        )
-
-    def test_release_claim_with_its_id_frees_it_immediately(self):
-        now = _iso(NOW)
-        claim_id = storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, now, FETCH_LEASE_SECONDS)
-        assert storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY, claim_id) is True
-        assert _claim_rows() == []
-        assert _is_claim_id(
-            storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, now, FETCH_LEASE_SECONDS)
-        )
-        # Releasing something never claimed is harmless and reports no-op.
-        assert storage.release_claim("minute", "AAPL", "0" * 32) is False
-        # A second release with an already-used id is a no-op too.
-        assert storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY, claim_id) is False
-
-    def test_release_claim_with_wrong_id_is_a_no_op(self):
-        now = _iso(NOW)
-        claim_id = storage.try_claim("minute", "AAPL", now, FETCH_LEASE_SECONDS)
-        assert _is_claim_id(claim_id)
-
-        assert storage.release_claim("minute", "AAPL", "not-our-claim") is False
-        assert storage.release_claim("minute", "AAPL", "f" * 32) is False
-
-        # The row is still there, still ours, still blocking others.
-        assert _claim_rows() == [("minute", "AAPL", now)]
-        assert _claim_ids() == {("minute", "AAPL"): claim_id}
-        assert storage.try_claim("minute", "AAPL", now, FETCH_LEASE_SECONDS) is None
-        # The right id still works afterwards.
-        assert storage.release_claim("minute", "AAPL", claim_id) is True
-        assert _claim_rows() == []
-
-    def test_superseded_holder_cannot_release_the_new_claim(self):
-        # Worker A claims, then stalls past its lease ...
-        a_id = storage.try_claim("hour", "AAPL", _iso(NOW), FETCH_LEASE_SECONDS)
-        assert _is_claim_id(a_id)
-        # ... so worker B takes the claim over with a fresh token.
-        later = _iso(NOW + timedelta(seconds=FETCH_LEASE_SECONDS + 1))
-        b_id = storage.try_claim("hour", "AAPL", later, FETCH_LEASE_SECONDS)
-        assert _is_claim_id(b_id) and b_id != a_id
-
-        # A finally finishes and releases with ITS id: B's claim must stay.
-        assert storage.release_claim("hour", "AAPL", a_id) is False
-        assert _claim_rows() == [("hour", "AAPL", later)]
-        assert _claim_ids() == {("hour", "AAPL"): b_id}
-        # A third worker still cannot get in while B's lease is live.
-        assert storage.try_claim("hour", "AAPL", later, FETCH_LEASE_SECONDS) is None
-
-        # B's own release, with B's id, does remove it.
-        assert storage.release_claim("hour", "AAPL", b_id) is True
-        assert _claim_rows() == []
-
-    def test_claims_are_per_pair(self):
-        now = _iso(NOW)
-        ids = {
-            storage.try_claim("minute", "AAPL", now, FETCH_LEASE_SECONDS),
-            storage.try_claim("minute", "MSFT", now, FETCH_LEASE_SECONDS),
-            storage.try_claim("hour", "AAPL", now, FETCH_LEASE_SECONDS),
-        }
-        assert all(_is_claim_id(i) for i in ids)
-        assert len(ids) == 3  # every claim gets its own token
-        assert storage.try_claim("minute", "AAPL", now, FETCH_LEASE_SECONDS) is None
-
-    def test_rejects_unknown_tier(self):
-        with pytest.raises(ValueError):
-            storage.try_claim("weekly", "AAPL", _iso(NOW), 10)
-
-    def test_failed_fetch_releases_the_claim(self, alpaca, client, fake_utcnow):
-        alpaca.mode = "500"
-
-        assert client.get("/api/stocks").status_code == 200
-
-        assert alpaca.snapshot_calls == 1
-        assert _claim_rows() == []
-        assert stocks_router._backoff.consecutive_failures == 1
-
-    def test_unexpected_error_releases_claim_and_propagates(
-        self, alpaca, fake_utcnow
-    ):
-        with patch(
-            "app.routers.stocks.alpaca_client.fetch_summaries",
-            side_effect=RuntimeError("boom"),
-        ):
-            with pytest.raises(RuntimeError):
-                asyncio.run(stocks_router._get_summaries_batch())
-
-        assert _claim_rows() == []
-        # The lock was released too: a later call proceeds normally.
-        assert asyncio.run(stocks_router._get_summaries_batch())["AAPL"].price == 100.0
-        assert alpaca.snapshot_calls == 1
-
-    def test_claim_held_by_another_process_serves_table_without_alpaca(
-        self, alpaca, client, fake_utcnow
-    ):
-        # "Another process" took the lease a moment ago (seeded directly)
-        # and is fetching into the shared table right now.
-        _seed_table(_iso(NOW - timedelta(seconds=CACHE_TTL_SECONDS + 1)), base=50.0)
-        assert storage.try_claim(
-            SUMMARIES_TIER, SUMMARIES_KEY, _iso(NOW - timedelta(seconds=1)), FETCH_LEASE_SECONDS
-        )
-
-        response = client.get("/api/stocks")
-
-        assert response.status_code == 200
-        assert alpaca.calls == 0
-        stocks = response.json()["stocks"]
-        assert all(s["is_stale"] is True for s in stocks)
-        assert {s["ticker"]: s["price"] for s in stocks}["AAPL"] == pytest.approx(50.0)
-        # The other process's lease is intact (we did not steal or release it).
-        assert _claim_rows() == [
-            (SUMMARIES_TIER, SUMMARIES_KEY, _iso(NOW - timedelta(seconds=1)))
-        ]
-        assert stocks_router._backoff.consecutive_failures == 0
-
-        # Once the lease expires (holder crashed) we take over and fetch.
-        fake_utcnow.advance(FETCH_LEASE_SECONDS + 1)
-        assert client.get("/api/stocks").status_code == 200
-        assert alpaca.snapshot_calls == 1
-
-    def test_claim_held_by_another_process_with_empty_table_is_200(
-        self, alpaca, client, fake_utcnow
-    ):
-        assert storage.try_claim(SUMMARIES_TIER, SUMMARIES_KEY, _iso(NOW), FETCH_LEASE_SECONDS)
-
-        response = client.get("/api/stocks")
-
-        assert response.status_code == 200
-        assert alpaca.calls == 0
-        stocks = response.json()["stocks"]
-        assert len(stocks) == 20
-        assert all(s["error"] == stocks_router.NO_DATA_ERROR for s in stocks)
-        assert all(s["is_stale"] is True for s in stocks)
-
-    def test_superseded_summaries_fetch_leaves_the_new_claim_in_place(
-        self, alpaca, fake_utcnow
-    ):
-        # Our request takes the lease, then its Alpaca call stalls past the
-        # lease window; meanwhile "another process" takes the claim over.
-        real_fetch = alpaca_client.fetch_summaries
-        taken_over: dict[str, str] = {}
-
-        def stalled_fetch(symbols):
-            fake_utcnow.advance(FETCH_LEASE_SECONDS + 1)
-            other = storage.try_claim(
-                SUMMARIES_TIER, SUMMARIES_KEY, _iso(fake_utcnow.now), FETCH_LEASE_SECONDS
-            )
-            assert _is_claim_id(other)
-            taken_over["id"] = other
-            return real_fetch(symbols)
-
-        with patch(
-            "app.routers.stocks.alpaca_client.fetch_summaries", side_effect=stalled_fetch
-        ):
-            batch = asyncio.run(stocks_router._get_summaries_batch())
-
-        # Our request completed normally ...
-        assert batch["AAPL"].price == 100.0
-        assert alpaca.snapshot_calls == 1
-        # ... but its release did NOT delete the second claimant's row.
-        assert _claim_ids() == {(SUMMARIES_TIER, SUMMARIES_KEY): taken_over["id"]}
-        assert _claim_rows() == [(SUMMARIES_TIER, SUMMARIES_KEY, _iso(fake_utcnow.now))]
-        # The second claimant's own release is what clears it.
-        assert (
-            storage.release_claim(SUMMARIES_TIER, SUMMARIES_KEY, taken_over["id"]) is True
-        )
-        assert _claim_rows() == []
-
-    def test_superseded_summaries_fetch_that_fails_leaves_the_new_claim_in_place(
-        self, alpaca, fake_utcnow
-    ):
-        taken_over: dict[str, str] = {}
-
-        def stalled_then_boom(symbols):
-            fake_utcnow.advance(FETCH_LEASE_SECONDS + 1)
-            taken_over["id"] = storage.try_claim(
-                SUMMARIES_TIER, SUMMARIES_KEY, _iso(fake_utcnow.now), FETCH_LEASE_SECONDS
-            )
-            raise RuntimeError("boom")
-
-        with patch(
-            "app.routers.stocks.alpaca_client.fetch_summaries", side_effect=stalled_then_boom
-        ):
-            with pytest.raises(RuntimeError):
-                asyncio.run(stocks_router._get_summaries_batch())
-
-        assert _is_claim_id(taken_over["id"])
-        assert _claim_ids() == {(SUMMARIES_TIER, SUMMARIES_KEY): taken_over["id"]}
-
-
 class TestRestart:
     def test_new_process_within_ttl_serves_table_without_alpaca(
         self, alpaca, client, fake_utcnow
@@ -773,59 +566,156 @@ class TestAlpacaClientTimeout:
         with alpaca_client._client() as client:
             assert client.timeout == httpx.Timeout(3.5)
 
-    def test_default_timeout_and_lease(self):
+    def test_default_timeout(self):
         assert config.ALPACA_TIMEOUT_SECONDS == 5.0
-        assert config.FETCH_LEASE_SECONDS == 10.0
-        assert config.FETCH_LEASE_SECONDS >= config.ALPACA_TIMEOUT_SECONDS
+
+    def test_the_fetch_lease_setting_is_gone(self):
+        # It only ever bounded the `fetch_claims` lease, which no longer
+        # exists; leaving it behind would imply a guarantee we dropped.
+        assert not hasattr(config, "FETCH_LEASE_SECONDS")
 
 
-class TestHistoryLease:
-    async def test_refresh_history_honours_and_clears_the_lease(self, fake_utcnow):
-        # Lease held by "another process": no fetch, returns False.
-        other_id = storage.try_claim("minute", "AAPL", _iso(NOW), FETCH_LEASE_SECONDS)
-        assert _is_claim_id(other_id)
-        with patch("app.routers.stocks.alpaca_client.fetch_bars", return_value=[]) as mock_fetch:
-            assert await stocks_router.refresh_history("AAPL", "minute") is False
-            assert mock_fetch.call_count == 0
-            assert storage.last_fetch_at("minute", "AAPL") is None
+class TestNoLeaseTable:
+    """`fetch_claims` is gone. Nothing in a refresh path creates it, and a
+    legacy table left behind in an older DB file must be ignored (and
+    dropped by `init_db`), never honoured as a lease."""
 
-            # Lease released (holder finished): we fetch, and leave no lease.
-            assert storage.release_claim("minute", "AAPL", other_id) is True
-            assert await stocks_router.refresh_history("AAPL", "minute") is True
-            assert mock_fetch.call_count == 1
-            assert storage.last_fetch_at("minute", "AAPL") == _iso(NOW)
-            assert _claim_rows() == []
+    def test_a_refresh_creates_no_claim_table(self, alpaca, client, fake_utcnow):
+        assert client.get("/api/stocks").status_code == 200
 
-    async def test_superseded_history_refresh_leaves_the_new_claim_in_place(
+        assert alpaca.snapshot_calls == 1
+        assert not _table_exists("fetch_claims")
+
+    def test_a_legacy_claim_row_does_not_block_the_leaderboard(
+        self, alpaca, client, fake_utcnow
+    ):
+        # An old build left a live claim for the summaries pseudo-pair. It
+        # used to mean "another process is fetching, serve the table as-is";
+        # now it means nothing at all.
+        _seed_table(_iso(NOW - timedelta(seconds=CACHE_TTL_SECONDS + 1)), base=50.0)
+        _seed_legacy_claim_table(SUMMARIES_TIER, SUMMARIES_KEY, _iso(NOW))
+
+        response = client.get("/api/stocks")
+
+        assert response.status_code == 200
+        assert alpaca.snapshot_calls == 1
+        stocks = response.json()["stocks"]
+        assert all(s["is_stale"] is False for s in stocks)
+        assert {s["ticker"]: s["price"] for s in stocks}["AAPL"] == pytest.approx(100.0)
+        # Whether the dead table is still on disk is `init_db`'s business
+        # (it drops it at startup -- see TestLegacyFetchClaimsDropped), not
+        # this path's: what matters here is that it did not block the fetch.
+
+    def test_a_sweep_creates_no_claim_table(self, alpaca, fake_utcnow):
+        _seed_table(_iso(NOW - timedelta(seconds=CACHE_TTL_SECONDS + 1)), base=50.0)
+
+        with patch("app.routers.stocks.alpaca_client.fetch_bars", return_value=[]):
+            asyncio.run(backfill.sweep())
+
+        assert alpaca.snapshot_calls == 1
+        assert not _table_exists("fetch_claims")
+
+
+class TestFailurePathsFreeTheLock:
+    """What the `finally: release_claim` used to cover: an exception must
+    still leave the next caller able to refresh."""
+
+    def test_failed_fetch_records_one_backoff_and_still_serves_200(
+        self, alpaca, client, fake_utcnow
+    ):
+        alpaca.mode = "500"
+
+        assert client.get("/api/stocks").status_code == 200
+
+        assert alpaca.snapshot_calls == 1
+        assert stocks_router._backoff.consecutive_failures == 1
+        assert not _table_exists("fetch_claims")
+
+    def test_unexpected_error_propagates_and_a_later_call_still_refreshes(
+        self, alpaca, fake_utcnow
+    ):
+        with patch(
+            "app.routers.stocks.alpaca_client.fetch_summaries",
+            side_effect=RuntimeError("boom"),
+        ):
+            with pytest.raises(RuntimeError):
+                asyncio.run(stocks_router._get_summaries_batch())
+
+        # The lock was released on the way out: the next call proceeds.
+        assert asyncio.run(stocks_router._get_summaries_batch())["AAPL"].price == 100.0
+        assert alpaca.snapshot_calls == 1
+
+
+class TestHistorySingleFlight:
+    """`refresh_history` keeps its per-pair `asyncio.Lock`; the lease it used
+    to take on top of that is gone."""
+
+    async def test_concurrent_refreshes_of_one_pair_make_one_alpaca_call(
         self, fake_utcnow
     ):
-        taken_over: dict[str, str] = {}
-
-        def stalled_fetch_bars(ticker, timeframe, start):
-            # We overran the lease; another process took the pair over.
-            fake_utcnow.advance(FETCH_LEASE_SECONDS + 1)
-            taken_over["id"] = storage.try_claim(
-                "minute", "AAPL", _iso(fake_utcnow.now), FETCH_LEASE_SECONDS
+        with patch(
+            "app.routers.stocks.alpaca_client.fetch_bars", return_value=[]
+        ) as mock_fetch:
+            results = await asyncio.gather(
+                *(stocks_router.refresh_history("AAPL", "minute") for _ in range(5))
             )
-            return []
+
+        assert mock_fetch.call_count == 1
+        # Exactly one caller did the fetch; the rest found the pair fresh.
+        assert sorted(results) == [False, False, False, False, True]
+        assert storage.last_fetch_at("minute", "AAPL") == _iso(NOW)
+
+    async def test_different_pairs_refresh_independently(self, fake_utcnow):
+        with patch(
+            "app.routers.stocks.alpaca_client.fetch_bars", return_value=[]
+        ) as mock_fetch:
+            results = await asyncio.gather(
+                stocks_router.refresh_history("AAPL", "minute"),
+                stocks_router.refresh_history("MSFT", "minute"),
+                stocks_router.refresh_history("AAPL", "hour"),
+            )
+
+        assert results == [True, True, True]
+        assert mock_fetch.call_count == 3
+
+    async def test_a_fresh_pair_returns_false_without_fetching(self, fake_utcnow):
+        storage.record_fetch("minute", "AAPL", _iso(NOW))
 
         with patch(
-            "app.routers.stocks.alpaca_client.fetch_bars", side_effect=stalled_fetch_bars
-        ):
+            "app.routers.stocks.alpaca_client.fetch_bars", return_value=[]
+        ) as mock_fetch:
+            assert await stocks_router.refresh_history("AAPL", "minute") is False
+
+        assert mock_fetch.call_count == 0
+
+    async def test_a_legacy_claim_row_does_not_block_a_pair_refresh(self, fake_utcnow):
+        # Previously this returned False without fetching.
+        _seed_legacy_claim_table("minute", "AAPL", _iso(NOW))
+
+        with patch(
+            "app.routers.stocks.alpaca_client.fetch_bars", return_value=[]
+        ) as mock_fetch:
             assert await stocks_router.refresh_history("AAPL", "minute") is True
 
-        assert _is_claim_id(taken_over["id"])
-        # Our `finally` release was fenced out: the takeover's claim survives.
-        assert _claim_ids() == {("minute", "AAPL"): taken_over["id"]}
-        assert _claim_rows() == [("minute", "AAPL", _iso(fake_utcnow.now))]
-        assert storage.release_claim("minute", "AAPL", taken_over["id"]) is True
-        assert _claim_rows() == []
+        assert mock_fetch.call_count == 1
+        assert storage.last_fetch_at("minute", "AAPL") == _iso(NOW)
 
-    async def test_refresh_history_releases_lease_on_alpaca_error(self, fake_utcnow):
+    async def test_alpaca_error_writes_nothing_and_leaves_the_pair_stale(
+        self, fake_utcnow
+    ):
         with patch(
             "app.routers.stocks.alpaca_client.fetch_bars",
             side_effect=AlpacaError("alpaca error: down"),
         ):
             with pytest.raises(AlpacaError):
                 await stocks_router.refresh_history("AAPL", "hour")
-        assert _claim_rows() == []
+
+        assert storage.last_fetch_at("hour", "AAPL") is None
+        assert not _table_exists("fetch_claims")
+
+        # And the failure did not wedge the pair: the next call retries.
+        with patch(
+            "app.routers.stocks.alpaca_client.fetch_bars", return_value=[]
+        ) as mock_fetch:
+            assert await stocks_router.refresh_history("AAPL", "hour") is True
+        assert mock_fetch.call_count == 1

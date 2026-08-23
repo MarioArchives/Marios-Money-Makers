@@ -12,8 +12,8 @@ The stored clock is served with zero Alpaca calls until one of the
 boundaries it carries arrives -- `now` before both `next_open` and
 `next_close`. That is the ONLY expiry rule: there is no TTL, so an old
 `fetched_at` is not by itself a reason to refetch. When a boundary has
-passed, one worker (in-process lock + cross-process lease) refetches and
-rewrites the key. On Alpaca failure the
+passed, one worker (the in-process `asyncio.Lock` -- there is no
+cross-process lease any more) refetches and rewrites the key. On Alpaca failure the
 stored clock is served `is_stale=True` with the error; 503 only when
 nothing has ever been stored.
 """
@@ -25,6 +25,7 @@ import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -106,6 +107,32 @@ def _meta_value() -> dict | None:
             "SELECT value FROM meta WHERE key = ?", (storage.MARKET_CLOCK_META_KEY,)
         ).fetchone()
     return json.loads(row[0]) if row else None
+
+
+def _table_exists(name: str) -> bool:
+    with sqlite3.connect(config.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (name,)
+        ).fetchone()
+    return row is not None
+
+
+def _seed_legacy_claim_table(tier: str, ticker: str, claimed_at: str) -> None:
+    """Recreate the dropped `fetch_claims` table with one live claim row for
+    the clock pseudo-pair, as an older build would have left it."""
+    Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(config.DB_PATH) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fetch_claims ("
+            "tier TEXT NOT NULL, ticker TEXT NOT NULL, claimed_at TEXT NOT NULL, "
+            "claim_id TEXT NOT NULL, PRIMARY KEY (tier, ticker))"
+        )
+        conn.execute(
+            "INSERT INTO fetch_claims (tier, ticker, claimed_at, claim_id) "
+            "VALUES (?, ?, ?, ?)",
+            (tier, ticker, claimed_at, "f" * 32),
+        )
+        conn.commit()
 
 
 def _expected(clock: MarketClock, *, fetched_at: str, is_stale: bool, error=None) -> dict:
@@ -293,48 +320,6 @@ class TestMarketClockEndpoint:
         assert all(body == bodies[0] for body in bodies)
         assert bodies[0]["is_stale"] is False
 
-    @patch("app.routers.market.alpaca_client.fetch_clock")
-    def test_lease_held_by_another_process_serves_stored_without_fetching(
-        self, mock_fetch, client, fake_utcnow, monkeypatch
-    ):
-        fetched_at = _iso(NOW - timedelta(hours=2))
-        storage.set_market_clock(PASSED_CLOCK, fetched_at=fetched_at)
-        monkeypatch.setattr(market_router.storage, "try_claim", lambda *a, **k: None)
-
-        response = client.get("/api/market/clock")
-
-        assert response.status_code == 200
-        assert response.json() == _expected(PASSED_CLOCK, fetched_at=fetched_at, is_stale=True)
-        assert mock_fetch.call_count == 0
-
-    @patch("app.routers.market.alpaca_client.fetch_clock")
-    def test_lease_held_by_another_process_with_nothing_stored_is_503(
-        self, mock_fetch, client, fake_utcnow, monkeypatch
-    ):
-        monkeypatch.setattr(market_router.storage, "try_claim", lambda *a, **k: None)
-
-        response = client.get("/api/market/clock")
-
-        assert response.status_code == 503
-        assert mock_fetch.call_count == 0
-
-    @patch("app.routers.market.alpaca_client.fetch_clock")
-    def test_lease_is_released_after_the_fetch(self, mock_fetch, client, fake_utcnow):
-        mock_fetch.return_value = CLOSED_CLOCK
-
-        client.get("/api/market/clock")
-
-        claim_id = storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10)
-        assert claim_id is not None
-
-    @patch("app.routers.market.alpaca_client.fetch_clock")
-    def test_lease_is_released_after_a_failed_fetch(self, mock_fetch, client, fake_utcnow):
-        mock_fetch.side_effect = AlpacaError("alpaca error: boom")
-
-        client.get("/api/market/clock")
-
-        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is not None
-
 
 class TestRefreshClock:
     """`refresh_clock()` is the sweep's entry point: same refresh, no HTTP,
@@ -402,3 +387,66 @@ class TestAppWiring:
         # The clock expires on its own boundaries, never on a timer: there
         # is no TTL setting to tune (or to leave stale in a deployment).
         assert not hasattr(config, "CLOCK_CACHE_TTL_SECONDS")
+
+
+class TestNoLeaseTable:
+    """The clock refresh used to take a `fetch_claims` lease under the
+    pseudo-pair ('clock', '*'). Both are gone: only the in-process lock
+    remains, and a legacy claim row must not hold the clock hostage."""
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    def test_a_refresh_creates_no_claim_table(self, mock_fetch, client, fake_utcnow):
+        mock_fetch.return_value = CLOSED_CLOCK
+
+        assert client.get("/api/market/clock").status_code == 200
+
+        assert mock_fetch.call_count == 1
+        assert not _table_exists("fetch_claims")
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    def test_a_legacy_claim_row_does_not_block_the_clock_refresh(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        # Used to serve the stored clock stale with zero Alpaca calls.
+        mock_fetch.return_value = CLOSED_CLOCK
+        fetched_at = _iso(NOW - timedelta(hours=2))
+        storage.set_market_clock(PASSED_CLOCK, fetched_at=fetched_at)
+        _seed_legacy_claim_table("clock", "*", _iso(NOW))
+
+        response = client.get("/api/market/clock")
+
+        assert response.status_code == 200
+        assert mock_fetch.call_count == 1
+        assert response.json() == _expected(
+            CLOSED_CLOCK, fetched_at=_iso(NOW), is_stale=False
+        )
+        assert not _table_exists("fetch_claims")
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    def test_a_legacy_claim_row_with_nothing_stored_is_not_a_503(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        # The "lease held elsewhere + nothing stored -> 503" path is gone;
+        # 503 now means Alpaca failed with an empty store, nothing else.
+        mock_fetch.return_value = CLOSED_CLOCK
+        _seed_legacy_claim_table("clock", "*", _iso(NOW))
+
+        response = client.get("/api/market/clock")
+
+        assert response.status_code == 200
+        assert mock_fetch.call_count == 1
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    def test_unexpected_error_propagates_and_a_later_request_still_refreshes(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        mock_fetch.side_effect = [RuntimeError("boom"), CLOSED_CLOCK]
+
+        with pytest.raises(RuntimeError):
+            client.get("/api/market/clock")
+
+        # The lock was released on the exception path.
+        response = client.get("/api/market/clock")
+        assert response.status_code == 200
+        assert response.json()["is_stale"] is False
+        assert mock_fetch.call_count == 2
