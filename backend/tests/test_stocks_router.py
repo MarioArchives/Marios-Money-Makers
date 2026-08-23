@@ -294,6 +294,35 @@ class TestListStocks:
         assert aapl[4]  # recorded_at stamped
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
+    def test_repeated_identical_minute_bar_does_not_bump_recorded_at(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        # The leaderboard poll upserts each ticker's latest minute bar every
+        # ~20s. While that bar is unchanged its `recorded_at` must stay put;
+        # a price change on the same (ticker, ts) restamps it.
+        mock_fetch.return_value = _success_batch()
+        client.get("/api/stocks")
+        first = {r[0]: r for r in _table_rows("bars_minute")}["AAPL"]
+        assert first[4] == _iso(NOW)
+
+        fake_utcnow.advance(CACHE_TTL_SECONDS + 1)
+        mock_fetch.return_value = _success_batch()  # same ts, same prices
+        client.get("/api/stocks")
+        assert mock_fetch.call_count == 2
+        second = {r[0]: r for r in _table_rows("bars_minute")}["AAPL"]
+        assert second[4] == _iso(NOW)  # unchanged
+
+        fake_utcnow.advance(CACHE_TTL_SECONDS + 1)
+        summaries, minute_bars = _success_batch()
+        moved = minute_bars["AAPL"]
+        minute_bars["AAPL"] = Bar(ts=moved.ts, price=moved.price + 1.0, analytics=moved.analytics)
+        mock_fetch.return_value = (summaries, minute_bars)
+        client.get("/api/stocks")
+        third = {r[0]: r for r in _table_rows("bars_minute")}["AAPL"]
+        assert third[1] == pytest.approx(moved.price + 1.0)
+        assert third[4] == _iso(fake_utcnow.now)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_partial_failure_persists_only_good_tickers_bars(
         self, mock_fetch, client
     ):
@@ -861,9 +890,10 @@ class TestGetStockHistory:
         points = response.json()["points"]
         assert [p["t"] for p in points] == [ancient, "2026-08-19T04:00:00Z"]
         assert [p["close"] for p in points] == pytest.approx([42.0, 95.0])
-        # The Alpaca request itself is still bounded by the backfill window.
+        # The Alpaca request reaches back to the oldest stored daily bar
+        # (see TestNoStragglerDailyBars), so that row is re-checked too.
         _, _, start = _bars_call(mock_fetch.call_args)
-        assert start == NOW - timedelta(days=365)
+        assert start == NOW - timedelta(days=3 * 365)
 
         # Fresh read (no second fetch) serves the same unbounded series, and
         # so does the stale-on-error path.
@@ -960,6 +990,119 @@ class TestGetStockHistory:
         assert second.status_code == 200
         assert mock_fetch.call_count == 1
         assert first.json()["points"] == second.json()["points"]
+
+
+class TestNoStragglerDailyBars:
+    """The month tier's Alpaca fetch reaches back to the oldest stored daily
+    bar, so rows that have aged out of the 365-day backfill window are still
+    re-checked (and re-adjusted after a split) on every refresh -- no
+    stragglers. Minute/hour keep their fixed windows (prune keeps them in
+    step)."""
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_month_fetch_starts_at_oldest_stored_row_when_older_than_window(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        ancient = _iso(NOW - timedelta(days=3 * 365))
+        old_stamp = _iso(NOW - timedelta(days=400))
+        storage.upsert_bars("month", "AAPL", [_bar(ancient, 42.0)], old_stamp)
+        mock_fetch.return_value = [
+            _bar(ancient, 42.0),  # unchanged
+            _bar("2026-08-19T04:00:00Z", 95.0),
+        ]
+
+        response = client.get("/api/stocks/AAPL/history?range=all")
+
+        assert response.status_code == 200
+        symbol, timeframe, start = _bars_call(mock_fetch.call_args)
+        assert (symbol, timeframe) == ("AAPL", "1Day")
+        assert start == NOW - timedelta(days=3 * 365)
+        by_ts = {r[3]: r for r in _table_rows("bars_month")}
+        assert by_ts[ancient][4] == old_stamp  # same price -> stamp untouched
+        assert by_ts["2026-08-19T04:00:00Z"][4] == _iso(NOW)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_split_adjusted_old_row_is_rewritten_and_restamped(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        ancient = _iso(NOW - timedelta(days=3 * 365))
+        old_stamp = _iso(NOW - timedelta(days=400))
+        storage.upsert_bars("month", "AAPL", [_bar(ancient, 400.0)], old_stamp)
+        mock_fetch.return_value = [_bar(ancient, 100.0)]  # 4:1 split adjusted
+
+        client.get("/api/stocks/AAPL/history?range=all")
+
+        rows = _table_rows("bars_month")
+        assert len(rows) == 1
+        assert rows[0][1] == pytest.approx(100.0)
+        assert rows[0][4] == _iso(NOW)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_month_fetch_keeps_window_when_oldest_row_is_inside_it(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        recent = _iso(NOW - timedelta(days=30))
+        storage.upsert_bars("month", "AAPL", [_bar(recent, 42.0)], _iso(NOW))
+        mock_fetch.return_value = []
+
+        client.get("/api/stocks/AAPL/history?range=all")
+
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(days=365)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_month_fetch_keeps_window_when_nothing_is_stored(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        mock_fetch.return_value = []
+
+        client.get("/api/stocks/AAPL/history?range=all")
+
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(days=365)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_unparseable_oldest_ts_falls_back_to_window(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        storage.upsert_bars("month", "AAPL", [_bar("garbage", 1.0)], _iso(NOW))
+        mock_fetch.return_value = []
+
+        response = client.get("/api/stocks/AAPL/history?range=all")
+
+        assert response.status_code == 200
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(days=365)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_oldest_row_of_another_ticker_does_not_widen_the_fetch(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        ancient = _iso(NOW - timedelta(days=3 * 365))
+        storage.upsert_bars("month", "MSFT", [_bar(ancient, 42.0)], _iso(NOW))
+        mock_fetch.return_value = []
+
+        client.get("/api/stocks/AAPL/history?range=all")
+
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(days=365)
+
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    def test_minute_and_hour_fetches_keep_fixed_windows_despite_ancient_rows(
+        self, mock_fetch, client, fake_utcnow
+    ):
+        ancient = _iso(NOW - timedelta(days=3 * 365))
+        storage.upsert_bars("minute", "AAPL", [_bar(ancient, 1.0)], _iso(NOW))
+        storage.upsert_bars("hour", "AAPL", [_bar(ancient, 1.0)], _iso(NOW))
+        mock_fetch.return_value = []
+
+        client.get("/api/stocks/AAPL/history?range=1d")
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(hours=24)
+
+        client.get("/api/stocks/AAPL/history?range=30d")
+        _, _, start = _bars_call(mock_fetch.call_args)
+        assert start == NOW - timedelta(days=30)
 
 
 class TestGetStoredData:

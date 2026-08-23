@@ -4,6 +4,7 @@ import {
   DEFAULT_HISTORY_RANGE,
   type HistoryRange,
   type HistoryResponse,
+  type MarketClockResponse,
   type StockSummary,
   type StocksResponse,
   type StoredDataResponse,
@@ -82,13 +83,29 @@ export function useStocksQuery(): UseQueryResult<StocksResponse, Error> {
 /**
  * Polls `GET /api/stocks/{ticker}` every POLL_INTERVAL_MS for a single
  * stock's price/change, independently of that ticker's history query.
+ *
+ * `select` narrows what the caller subscribes to. React Query applies
+ * structural sharing to the selected value, so a component that only
+ * needs e.g. `name`/`sector` keeps a stable reference across polls and
+ * does not re-render on every price tick (pass a module-level function so
+ * the selector itself is stable). Observers with and without `select`
+ * share the same cache entry — no extra requests.
  */
-export function useStockDetailQuery(ticker: string): UseQueryResult<StockSummary, Error> {
-  return useQuery({
+export function useStockDetailQuery(ticker: string): UseQueryResult<StockSummary, Error>
+export function useStockDetailQuery<T>(
+  ticker: string,
+  select: (summary: StockSummary) => T,
+): UseQueryResult<T, Error>
+export function useStockDetailQuery<T = StockSummary>(
+  ticker: string,
+  select?: (summary: StockSummary) => T,
+): UseQueryResult<T, Error> {
+  return useQuery<StockSummary, Error, T>({
     queryKey: stockKey(ticker),
     queryFn: () => apiGet<StockSummary>(`/api/stocks/${ticker}`),
     refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
+    select,
   })
 }
 
@@ -134,6 +151,26 @@ export function useStoredDataQuery(
   return useQuery({
     queryKey: storedKey(ticker, tier),
     queryFn: () => apiGet<StoredDataResponse>(`/api/stocks/${ticker}/stored?tier=${tier}`),
+    refetchInterval: alignedPollInterval,
+    staleTime: STALE_TIME_MS,
+  })
+}
+
+/** Query key for the backend market clock (`GET /api/market/clock`). */
+export const marketClockKey = ['market', 'clock'] as const
+
+/**
+ * Polls `GET /api/market/clock` on the shared aligned tick: whether the US
+ * market is open right now, and the instants of the next open/close, as
+ * reported by the backend (sourced from Alpaca's `/v2/clock`). Keyed under
+ * `market` rather than `stocks`/`stock`, so `usePollCountdown` — which only
+ * tracks stock queries for the header's "next refresh" clock — ignores it;
+ * that is intended, this query has its own consumer (`MarketStatusBanner`).
+ */
+export function useMarketClockQuery(): UseQueryResult<MarketClockResponse, Error> {
+  return useQuery({
+    queryKey: marketClockKey,
+    queryFn: () => apiGet<MarketClockResponse>('/api/market/clock'),
     refetchInterval: alignedPollInterval,
     staleTime: STALE_TIME_MS,
   })

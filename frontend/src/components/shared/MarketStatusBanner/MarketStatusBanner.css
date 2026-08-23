@@ -21,6 +21,13 @@
   border-left-color: var(--color-up);
 }
 
+/* The backend's best last-known reading, not a fresh one — a quiet fade
+   rather than a warning; the banner still says what it knows. */
+.market-status-banner.is-stale {
+  border-left-style: dashed;
+  opacity: 0.7;
+}
+
 .market-status-banner__mark {
   flex: none;
   align-self: center;

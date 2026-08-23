@@ -21,7 +21,9 @@
 }
 
 /* The plot's `color` is what the recharts Line reads via
-   stroke="currentColor", so the series follows the theme token. */
+   stroke="currentColor", so the series follows the theme token. The 1d
+   market-closed `ReferenceArea` bands fill with `--color-chart-closed`
+   (defined in global.css), not a token in this file. */
 .stock-chart__plot {
   width: 100%;
   height: 300px;

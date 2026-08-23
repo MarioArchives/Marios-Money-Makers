@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { RawDataTableProps } from './RawDataTable.props'
 import { useStoredDataQuery } from '../../../api/queries'
 import {
@@ -87,7 +87,7 @@ const countFormatter = new Intl.NumberFormat('en-US')
  * When the query fails, the last received rows stay in place and the card
  * greys out — no error text takes the table's place.
  */
-export function RawDataTable({ ticker, range = DEFAULT_HISTORY_RANGE }: RawDataTableProps): JSX.Element {
+function RawDataTableComponent({ ticker, range = DEFAULT_HISTORY_RANGE }: RawDataTableProps): JSX.Element {
   const [picked, setPicked] = useState<{ forRange: HistoryRange; tier: StoredTier } | null>(null)
   const tier = picked && picked.forRange === range ? picked.tier : TIER_FOR_RANGE[range]
   const { data, isError } = useStoredDataQuery(ticker, tier)
@@ -178,3 +178,11 @@ export function RawDataTable({ ticker, range = DEFAULT_HISTORY_RANGE }: RawDataT
     </section>
   )
 }
+
+/**
+ * Memoised: the table is the heaviest subtree on the page (every stored
+ * row, ~1 440 in the minute tier), so it must re-render only for its own
+ * query data, a tier pick or a ticker/range change — never because the
+ * parent page re-rendered.
+ */
+export const RawDataTable = memo(RawDataTableComponent)

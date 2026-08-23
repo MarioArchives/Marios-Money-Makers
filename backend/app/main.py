@@ -2,7 +2,8 @@
 
 Creates the `FastAPI` app, configures CORS from
 `app.config.ALLOWED_ORIGINS` (GET-only, per the plan's error-handling
-section), and wires up the stocks router. The lifespan hook initialises
+section), and wires up the stocks router and the market router (the
+Alpaca market clock, `GET /api/market/clock`). The lifespan hook initialises
 the SQLite store (and invalidates stale bar fetch stamps if
 ``ALPACA_BARS_ADJUSTMENT`` changed since the DB was last used) and, unless `app.config.BACKFILL_ENABLED` is off, runs
 the :mod:`app.backfill` sweep as a background task for the life of the
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import backfill, config, storage
 from app.config import ALLOWED_ORIGINS
+from app.routers.market import router as market_router
 from app.routers.stocks import router as stocks_router
 
 
@@ -59,6 +61,7 @@ app.add_middleware(
 )
 
 app.include_router(stocks_router)
+app.include_router(market_router)
 
 
 @app.get("/api/health", tags=["ops"])

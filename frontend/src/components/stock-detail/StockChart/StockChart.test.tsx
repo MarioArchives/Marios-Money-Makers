@@ -2,10 +2,16 @@ import { useEffect, type ReactNode } from 'react'
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UseQueryResult } from '@tanstack/react-query'
-import { StockChart } from './StockChart'
+import { StockChart, makeTimeFormatter } from './StockChart'
 import { useStockHistoryQuery } from '../../../api/queries'
-import type { HistoryPoint, HistoryResponse } from '../../../api/types'
+import type { HistoryPoint, HistoryRange, HistoryResponse } from '../../../api/types'
 import { FxRateContext } from '../../../providers/FxRateProvider/FxRateProvider'
+import {
+  GAP_BLOCK_MIN_SLOTS,
+  MARKET_CLOSED_LABEL,
+  buildIntradaySeries,
+  isGapKey,
+} from '../../../utils/intradaySeries'
 
 vi.mock('../../../api/queries', () => ({
   useStockHistoryQuery: vi.fn(),
@@ -37,10 +43,26 @@ vi.mock('recharts', () => ({
   Line: ({ dataKey, isAnimationActive }: { dataKey: string; isAnimationActive: boolean }) => (
     <div data-testid="line" data-key={dataKey} data-is-animation-active={String(isAnimationActive)} />
   ),
-  XAxis: () => <div data-testid="x-axis" />,
+  XAxis: ({ dataKey, type, scale }: { dataKey?: unknown; type?: string; scale?: unknown }) => (
+    <div
+      data-testid="x-axis"
+      data-key={typeof dataKey === 'string' ? dataKey : 'fn'}
+      data-type={type ?? 'category'}
+      data-scale={typeof scale === 'string' ? scale : ''}
+    />
+  ),
   YAxis: () => <div data-testid="y-axis" />,
   CartesianGrid: () => <div data-testid="cartesian-grid" />,
   Tooltip: () => <div data-testid="tooltip" />,
+  ReferenceArea: ({ x1, x2, label }: { x1?: number | string; x2?: number | string; label?: unknown }) => {
+    const text =
+      label && typeof label === 'object' && 'value' in label
+        ? String((label as { value: unknown }).value)
+        : typeof label === 'string'
+          ? label
+          : ''
+    return <div data-testid="reference-area" data-x1={String(x1)} data-x2={String(x2)} data-label={text} />
+  },
 }))
 
 const mockedUseStockHistoryQuery = vi.mocked(useStockHistoryQuery)
@@ -62,9 +84,21 @@ function buildHistoryResult(points: HistoryPoint[]): UseQueryResult<HistoryRespo
   } as unknown as UseQueryResult<HistoryResponse, Error>
 }
 
-function getRenderedPoints(): HistoryPoint[] {
+/** Exactly what the LineChart received (1d rows may include null placeholder columns). */
+function getRawPlotted(): Array<{ t: string; close: number | null }> {
   const el = screen.getByTestId('line-chart')
-  return JSON.parse(el.getAttribute('data-points') ?? '[]') as HistoryPoint[]
+  return JSON.parse(el.getAttribute('data-points') ?? '[]') as Array<{
+    t: string
+    close: number | null
+  }>
+}
+
+/** The real history points on the chart, as `{t, close}` — placeholder
+ * columns (the greyed market-closed block on the intraday chart) removed. */
+function getRenderedPoints(): HistoryPoint[] {
+  return getRawPlotted()
+    .filter((p): p is { t: string; close: number } => p.close !== null)
+    .map(({ t, close }) => ({ t, close }))
 }
 
 beforeEach(() => {
@@ -331,5 +365,176 @@ describe('StockChart GBP conversion', () => {
     render(<StockChart ticker="AZN.L" />)
 
     expect(getRenderedPoints()).toEqual([{ t: '2026-08-19T12:00:00Z', close: 100 }])
+  })
+})
+
+/**
+ * Intraday (1d) market-closed blocks: the minute chart keeps its categorical
+ * axis, and a real hole in the data that falls in a market-closed period is
+ * filled with a fixed-width block of null placeholder columns, greyed out by
+ * a `ReferenceArea` carrying the "no data" message. 30d / all get no blocks.
+ */
+describe('StockChart market-closed blocks', () => {
+  // August 2026: New York is EDT, so the 09:30-16:00 ET session is 13:30Z-20:00Z.
+  // 15-minute cadence around the one overnight hole: every other gap is
+  // under MIN_HOLE_MS, so exactly that hole gets the block.
+  const WED_1500 = '2026-08-19T19:00:00Z'
+  const WED_1545 = '2026-08-19T19:45:00Z'
+  const WED_1600 = '2026-08-19T20:00:00Z'
+  const THU_0930 = '2026-08-20T13:30:00Z'
+  const THU_0945 = '2026-08-20T13:45:00Z'
+  const overnight: HistoryPoint[] = [
+    { t: WED_1545, close: 100 },
+    { t: WED_1600, close: 101 },
+    { t: THU_0930, close: 102 },
+    { t: THU_0945, close: 103 },
+  ]
+
+  function buildRangeResult(
+    points: HistoryPoint[],
+    range: HistoryRange,
+  ): UseQueryResult<HistoryResponse, Error> {
+    return {
+      data: {
+        ticker: 'AZN.L',
+        interval: range === '1d' ? '1m' : range === '30d' ? '1h' : '1d',
+        range,
+        points,
+        is_stale: false,
+        error: null,
+      },
+      isSuccess: true,
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as unknown as UseQueryResult<HistoryResponse, Error>
+  }
+
+  function getBlocks(): Array<{ x1: string; x2: string; label: string }> {
+    return screen.queryAllByTestId('reference-area').map((el) => ({
+      x1: el.getAttribute('data-x1') ?? '',
+      x2: el.getAttribute('data-x2') ?? '',
+      label: el.getAttribute('data-label') ?? '',
+    }))
+  }
+
+  it('keeps the categorical axis on 1d', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(overnight, '1d'))
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    const axis = screen.getByTestId('x-axis')
+    expect(axis.getAttribute('data-key')).toBe('t')
+    expect(axis.getAttribute('data-type')).toBe('category')
+  })
+
+  it('fills the overnight hole with null placeholder columns and one labelled block over them', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(overnight, '1d'))
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    const raw = getRawPlotted()
+    const gaps = raw.filter((p) => isGapKey(p.t))
+    expect(gaps.length).toBeGreaterThanOrEqual(GAP_BLOCK_MIN_SLOTS)
+    expect(gaps.every((p) => p.close === null)).toBe(true)
+    // Placeholders sit between the two bars that bracket the hole.
+    expect(raw.map((p) => (isGapKey(p.t) ? null : p.close))).toEqual([
+      100,
+      101,
+      ...Array<null>(gaps.length).fill(null),
+      102,
+      103,
+    ])
+    expect(getBlocks()).toEqual([
+      { x1: gaps[0].t, x2: gaps[gaps.length - 1].t, label: MARKET_CLOSED_LABEL },
+    ])
+    // ...while the accumulated/rendered real points are untouched.
+    expect(getRenderedPoints()).toEqual(overnight)
+  })
+
+  it('renders no block for the ordinary bar cadence inside a session', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildRangeResult(
+        [
+          { t: WED_1500, close: 100 },
+          { t: '2026-08-19T19:15:00Z', close: 101 },
+        ],
+        '1d',
+      ),
+    )
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(getBlocks()).toEqual([])
+    expect(getRawPlotted()).toEqual([
+      { t: WED_1500, close: 100 },
+      { t: '2026-08-19T19:15:00Z', close: 101 },
+    ])
+  })
+
+  it('converts real closes to GBP but leaves placeholder columns null', () => {
+    const rate = { base: 'USD', quote: 'GBP', rate: 0.5, date: '2026-08-20', source: 'ECB' } as const
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(overnight, '1d'))
+    render(
+      <FxRateContext.Provider value={{ status: 'ready', rate }}>
+        <StockChart ticker="AZN.L" range="1d" />
+      </FxRateContext.Provider>,
+    )
+
+    const raw = getRawPlotted()
+    const slots = raw.filter((p) => isGapKey(p.t)).length
+    expect(raw.map((p) => p.close)).toEqual([50, 50.5, ...Array<null>(slots).fill(null), 51, 51.5])
+  })
+
+  it('keeps accumulating polled points and never remounts the chart on 1d', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(overnight.slice(0, 2), '1d'))
+    const { rerender } = render(<StockChart ticker="AZN.L" range="1d" />)
+    expect(getBlocks()).toEqual([])
+
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(overnight.slice(1), '1d'))
+    rerender(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(getRenderedPoints()).toEqual(overnight)
+    expect(getBlocks()).toHaveLength(1)
+    expect(mountTracker.count).toBe(1)
+  })
+
+  it.each(['30d', 'all'] as const)('draws no blocks on %s', (range) => {
+    // Points straddling a weekend: on the daily/hourly views that is just
+    // absent bars, not a greyed period.
+    const points: HistoryPoint[] = [
+      { t: '2026-08-21T19:00:00Z', close: 100 },
+      { t: '2026-08-24T14:00:00Z', close: 101 },
+    ]
+    mockedUseStockHistoryQuery.mockReturnValue(buildRangeResult(points, range))
+    render(<StockChart ticker="AZN.L" range={range} />)
+
+    const axis = screen.getByTestId('x-axis')
+    expect(axis.getAttribute('data-key')).toBe('t')
+    expect(axis.getAttribute('data-type')).toBe('category')
+    expect(getBlocks()).toEqual([])
+    // The data reaching recharts is exactly the points: no placeholders.
+    expect(getRawPlotted()).toEqual(points)
+  })
+})
+
+describe('makeTimeFormatter', () => {
+  it('formats a numeric ms value (time axis) and its ISO string (category axis) identically', () => {
+    const format = makeTimeFormatter('1d')
+    const iso = '2026-08-19T19:00:00Z'
+    expect(format(Date.parse(iso))).toBe(format(iso))
+    expect(format(iso)).toMatch(/^\d{2}:\d{2}$/)
+  })
+
+  it('falls back to the raw input when it cannot be parsed', () => {
+    expect(makeTimeFormatter('1d')('not-a-date')).toBe('not-a-date')
+    expect(makeTimeFormatter('30d')(Number.NaN)).toBe(Number.NaN)
+  })
+
+  it('renders a placeholder (gap) column as an empty tick label', () => {
+    const out = buildIntradaySeries([
+      { t: '2026-08-19T20:00:00Z', close: 101 },
+      { t: '2026-08-20T13:30:00Z', close: 102 },
+    ])
+    const gap = out.data.find((p) => isGapKey(p.t))
+    expect(gap).toBeDefined()
+    expect(makeTimeFormatter('1d')(gap!.t)).toBe('')
   })
 })

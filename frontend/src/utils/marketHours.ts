@@ -1,75 +1,23 @@
 /**
- * NYSE / Nasdaq regular-session clock, used by `MarketStatusBanner` to
- * explain why the board stops moving outside US hours.
+ * Formatting helpers for the NYSE / Nasdaq market clock shown by
+ * `MarketStatusBanner`.
  *
- * Regular session: 09:30-16:00 America/New_York, Monday-Friday, minus the
- * exchange holidays below; a handful of days close early at 13:00. All
- * wall-clock arithmetic goes through `Intl.DateTimeFormat` with the
- * `America/New_York` zone, so DST is handled by the platform's tz data and
- * no date library is needed. Everything here is pure (takes `now`, returns
- * values) so it can be unit-tested with fixed instants.
+ * The clock itself — whether the market is open, and the instants of the
+ * next open/close — comes from the backend (`GET /api/market/clock`,
+ * sourced from Alpaca's `/v2/clock`); this module keeps no session times or
+ * holiday calendar of its own. It only turns instants and durations into
+ * text: a New York wall-clock reading, a viewer-local reading, and the two
+ * countdown formats. All wall-clock arithmetic goes through
+ * `Intl.DateTimeFormat` with the `America/New_York` zone, so DST is handled
+ * by the platform's tz data and no date library is needed. Everything here
+ * is pure (takes an instant, returns a value) so it can be unit-tested with
+ * fixed instants.
  */
 
 export const MARKET_TIME_ZONE = 'America/New_York'
 
-export interface ClockTime {
-  hour: number
-  minute: number
-}
-
-export const MARKET_OPEN: ClockTime = { hour: 9, minute: 30 }
-export const MARKET_CLOSE: ClockTime = { hour: 16, minute: 0 }
-export const MARKET_EARLY_CLOSE: ClockTime = { hour: 13, minute: 0 }
-
-/**
- * NYSE full-day closures, as `YYYY-MM-DD` in New York local dates. Source:
- * NYSE Group holiday & early-closings press releases (2026/2027/2028
- * calendar, Nov 2025). Extend this list each year — dates after the last
- * entry are treated as ordinary weekdays, so an un-listed holiday will
- * merely show a countdown to a session that never comes.
- */
-export const NYSE_HOLIDAYS: ReadonlySet<string> = new Set([
-  // 2026
-  '2026-01-01', // New Year's Day
-  '2026-01-19', // Martin Luther King, Jr. Day
-  '2026-02-16', // Washington's Birthday
-  '2026-04-03', // Good Friday
-  '2026-05-25', // Memorial Day
-  '2026-06-19', // Juneteenth
-  '2026-07-03', // Independence Day (observed)
-  '2026-09-07', // Labor Day
-  '2026-11-26', // Thanksgiving Day
-  '2026-12-25', // Christmas Day
-  // 2027
-  '2027-01-01', // New Year's Day
-  '2027-01-18', // Martin Luther King, Jr. Day
-  '2027-02-15', // Washington's Birthday
-  '2027-03-26', // Good Friday
-  '2027-05-31', // Memorial Day
-  '2027-06-18', // Juneteenth (observed)
-  '2027-07-05', // Independence Day (observed)
-  '2027-09-06', // Labor Day
-  '2027-11-25', // Thanksgiving Day
-  '2027-12-24', // Christmas Day (observed)
-])
-
-/** Days the regular session ends at 13:00 ET (same source as above). */
-export const NYSE_EARLY_CLOSES: ReadonlySet<string> = new Set([
-  '2026-11-27', // day after Thanksgiving
-  '2026-12-24', // Christmas Eve
-  '2027-11-26', // day after Thanksgiving
-])
-
-export interface MarketStatus {
-  /** True during a regular session (open <= now < close). */
-  isOpen: boolean
-  /** Start of the next session (or the current one's successor while open). */
-  nextOpen: Date
-  /** End of the current session while open, otherwise the end of the next one. */
-  nextClose: Date
-  /** Whether the session `nextClose` belongs to is a 13:00 ET early close. */
-  isEarlyClose: boolean
-}
+/** The regular session's close, New York wall-clock time — the definition of "early" below. */
+const REGULAR_CLOSE = { hour: 16, minute: 0 }
 
 /** A calendar date in the market's local zone. `month` is 1-12. */
 interface LocalDate {
@@ -83,8 +31,6 @@ interface LocalDateTime extends LocalDate {
   minute: number
   second: number
 }
-
-const MS_PER_DAY = 86_400_000
 
 // Built once: constructing Intl formatters is expensive and this runs every
 // second. `hourCycle: 'h23'` avoids the "24:00" quirk of `hour12: false`.
@@ -115,97 +61,6 @@ export function toMarketLocal(instant: Date): LocalDateTime {
     minute: parts.minute,
     second: parts.second,
   }
-}
-
-function isoDate({ year, month, day }: LocalDate): string {
-  const mm = String(month).padStart(2, '0')
-  const dd = String(day).padStart(2, '0')
-  return `${year}-${mm}-${dd}`
-}
-
-/** Calendar weekday (0 = Sunday) of a local date — zone-independent. */
-function weekdayOf({ year, month, day }: LocalDate): number {
-  return new Date(Date.UTC(year, month - 1, day)).getUTCDay()
-}
-
-function addDays({ year, month, day }: LocalDate, days: number): LocalDate {
-  const d = new Date(Date.UTC(year, month - 1, day) + days * MS_PER_DAY)
-  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() }
-}
-
-/** Weekday and not an exchange holiday. */
-export function isTradingDay(date: LocalDate): boolean {
-  const weekday = weekdayOf(date)
-  return weekday !== 0 && weekday !== 6 && !NYSE_HOLIDAYS.has(isoDate(date))
-}
-
-/**
- * The instant at which New York's wall clock reads `date` + `time`.
- *
- * Start from the same wall time read as UTC, measure how far the New York
- * clock is from that guess, and correct; a second pass covers a guess that
- * landed on the other side of a DST change (which happens at 02:00, hours
- * away from either session boundary, so one pass is normally exact).
- */
-export function marketLocalToInstant(date: LocalDate, time: ClockTime): Date {
-  const target = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, 0, 0)
-  let guess = target
-  for (let pass = 0; pass < 2; pass += 1) {
-    const local = toMarketLocal(new Date(guess))
-    const read = Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second, 0)
-    if (read === target) {
-      break
-    }
-    guess += target - read
-  }
-  return new Date(guess)
-}
-
-interface Session {
-  open: Date
-  close: Date
-  isEarlyClose: boolean
-}
-
-function sessionOn(date: LocalDate): Session {
-  const isEarlyClose = NYSE_EARLY_CLOSES.has(isoDate(date))
-  return {
-    open: marketLocalToInstant(date, MARKET_OPEN),
-    close: marketLocalToInstant(date, isEarlyClose ? MARKET_EARLY_CLOSE : MARKET_CLOSE),
-    isEarlyClose,
-  }
-}
-
-/** First trading day strictly after `date` (bounded: no week is all holidays). */
-function nextTradingDayAfter(date: LocalDate): LocalDate {
-  let candidate = addDays(date, 1)
-  for (let i = 0; i < 14 && !isTradingDay(candidate); i += 1) {
-    candidate = addDays(candidate, 1)
-  }
-  return candidate
-}
-
-/**
- * Where the market is relative to `now`: open or closed, and the instants
- * of the next open and next close.
- */
-export function getMarketStatus(now: Date): MarketStatus {
-  const today = toMarketLocal(now)
-  const t = now.getTime()
-
-  if (isTradingDay(today)) {
-    const session = sessionOn(today)
-    if (t < session.open.getTime()) {
-      return { isOpen: false, nextOpen: session.open, nextClose: session.close, isEarlyClose: session.isEarlyClose }
-    }
-    if (t < session.close.getTime()) {
-      const following = sessionOn(nextTradingDayAfter(today))
-      return { isOpen: true, nextOpen: following.open, nextClose: session.close, isEarlyClose: session.isEarlyClose }
-    }
-  }
-
-  const next = sessionOn(nextTradingDayAfter(today))
-  return { isOpen: false, nextOpen: next.open, nextClose: next.close, isEarlyClose: next.isEarlyClose }
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
@@ -276,4 +131,14 @@ const viewerFormatter = new Intl.DateTimeFormat('en-GB', {
 /** The viewer's local reading of an instant, e.g. `"Mon 14:30 BST"`. */
 export function formatViewerClock(instant: Date): string {
   return viewerFormatter.format(instant).replace(',', '')
+}
+
+/**
+ * True iff `nextClose`'s New York wall-clock time lands before the regular
+ * 16:00 close — i.e. the session it belongs to is a holiday early close.
+ */
+export function isEarlyClose(nextClose: Date): boolean {
+  const local = toMarketLocal(nextClose)
+  return local.hour < REGULAR_CLOSE.hour ||
+    (local.hour === REGULAR_CLOSE.hour && local.minute < REGULAR_CLOSE.minute)
 }

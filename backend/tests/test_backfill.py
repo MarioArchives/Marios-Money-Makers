@@ -25,9 +25,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.backfill as backfill
+import app.routers.market as market_router
 import app.routers.stocks as stocks_router
 from app import alpaca_client, config, storage
-from app.alpaca_client import AlpacaError, Bar
+from app.alpaca_client import AlpacaError, Bar, MarketClock
 from app.main import app
 from app.storage import TIERS
 from app.tickers import TICKER_SYMBOLS
@@ -380,3 +381,96 @@ class TestConfigDefaults:
         assert config.BACKFILL_INTERVAL_SECONDS == 600.0
         assert config.BACKFILL_RATE_LIMIT_PAUSE_SECONDS == 60.0
         assert config.ALPACA_BARS_ADJUSTMENT == "split"
+
+
+class TestSweepReachesBackToOldestDailyBar:
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    async def test_month_pair_start_is_the_oldest_stored_row(
+        self, mock_fetch, fake_utcnow, sleeps
+    ):
+        # The sweep goes through `refresh_history`, so a daily bar that has
+        # aged out of the 365d window still widens AAPL's 1Day request;
+        # other tickers' month pairs keep the plain window.
+        ancient = _iso(NOW - timedelta(days=3 * 365))
+        storage.upsert_bars("month", "AAPL", [_bar(ancient, 42.0)], _iso(NOW))
+        mock_fetch.return_value = []
+
+        await backfill.sweep()
+
+        starts = {
+            (call.args[0], call.args[1]): call.args[2]
+            for call in mock_fetch.call_args_list
+        }
+        assert starts[("AAPL", "1Day")] == NOW - timedelta(days=3 * 365)
+        assert starts[("MSFT", "1Day")] == NOW - timedelta(days=365)
+        assert starts[("AAPL", "1Min")] == NOW - timedelta(hours=24)
+        assert starts[("AAPL", "1Hour")] == NOW - timedelta(days=30)
+
+
+class TestSweepRefreshesMarketClock:
+    """Every pass also refreshes the Alpaca market clock into `meta` (via the
+    market router's `refresh_clock`), so the stored market status is kept
+    current without a browser. A clock failure is logged and never stops
+    the pair refreshes."""
+
+    CLOCK = MarketClock(
+        timestamp=_iso(NOW),
+        is_open=False,
+        next_open=_iso(NOW + timedelta(hours=1, minutes=30)),
+        next_close=_iso(NOW + timedelta(hours=8)),
+    )
+
+    @pytest.fixture(autouse=True)
+    def _market_clock_seams(self, monkeypatch, fake_utcnow):
+        # The market router has its own `_utcnow` seam; drive it with the
+        # same frozen clock as the stocks router.
+        monkeypatch.setattr(market_router, "_utcnow", fake_utcnow)
+        market_router._refresh_locks = {}
+        yield
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    async def test_sweep_stores_the_clock_in_meta_once_per_pass(
+        self, mock_fetch, mock_clock, sleeps
+    ):
+        mock_fetch.return_value = []
+        mock_clock.return_value = self.CLOCK
+        assert storage.get_market_clock() is None
+
+        await backfill.sweep()
+
+        assert mock_clock.call_count == 1
+        stored = storage.get_market_clock()
+        assert stored is not None
+        assert stored.is_open is False
+        assert stored.next_open == self.CLOCK.next_open
+        assert stored.fetched_at == _iso(NOW)
+        # The pair refreshes still ran in full.
+        assert mock_fetch.call_count == 60
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    async def test_fresh_clock_is_not_refetched(self, mock_fetch, mock_clock, sleeps):
+        mock_fetch.return_value = []
+        storage.set_market_clock(self.CLOCK, fetched_at=_iso(NOW))
+
+        await backfill.sweep()
+
+        assert mock_clock.call_count == 0
+
+    @patch("app.routers.market.alpaca_client.fetch_clock")
+    @patch("app.routers.stocks.alpaca_client.fetch_bars")
+    async def test_clock_failure_is_logged_and_does_not_stop_the_pass(
+        self, mock_fetch, mock_clock, sleeps, caplog
+    ):
+        import logging
+
+        mock_fetch.return_value = []
+        mock_clock.side_effect = AlpacaError("alpaca error: clock down")
+
+        with caplog.at_level(logging.WARNING):
+            await backfill.sweep()
+
+        assert storage.get_market_clock() is None
+        assert mock_fetch.call_count == 60
+        assert any("clock" in record.getMessage() for record in caplog.records)

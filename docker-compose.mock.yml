@@ -1,0 +1,26 @@
+# Overlay: run the dev stack against the local mock Alpaca server instead of
+# the real API (no keys needed, deterministic sine prices, works offline).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mock.yml up --build
+#
+# The backend is pointed at the mock (both ALPACA_DATA_BASE_URL for
+# snapshots/bars and ALPACA_TRADING_BASE_URL for the legacy trading clock)
+# and at a SEPARATE SQLite file (mock.db on the same volume) so real Alpaca
+# data in stocks.db is never mixed with mock bars. Remove the overlay to go
+# back to real data.
+services:
+  mock-alpaca:
+    image: python:3.12-slim
+    command: ["python", "/mock/alpaca_mock.py", "--host", "0.0.0.0", "--port", "8500"]
+    volumes:
+      - ./mock:/mock:ro
+    ports:
+      - "8500:8500"
+
+  backend:
+    environment:
+      - ALPACA_DATA_BASE_URL=http://mock-alpaca:8500
+      - ALPACA_TRADING_BASE_URL=http://mock-alpaca:8500
+      - STOCKS_DB_PATH=/app/data/mock.db
+    depends_on:
+      - mock-alpaca

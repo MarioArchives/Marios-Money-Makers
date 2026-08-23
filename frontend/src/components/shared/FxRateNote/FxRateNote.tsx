@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { FxRateNoteProps } from './FxRateNote.props'
 import { useFxRate } from '../../../providers/FxRateProvider/FxRateProvider'
 import './FxRateNote.css'
@@ -10,8 +11,11 @@ export const FX_UNAVAILABLE_MESSAGE = 'GBP rate unavailable'
  * is still loading, and a muted "unavailable" note if it failed — the
  * GBP figures themselves disappear in that case, so the note is the only
  * signal.
+ *
+ * Memoised: it re-renders only when the shared rate context changes, not
+ * when a parent page re-renders on its 20 s poll.
  */
-export function FxRateNote(_props: FxRateNoteProps): JSX.Element | null {
+function FxRateNoteComponent(_props: FxRateNoteProps): JSX.Element | null {
   void _props
   const { status, rate } = useFxRate()
   if (status === 'loading') {
@@ -30,3 +34,5 @@ export function FxRateNote(_props: FxRateNoteProps): JSX.Element | null {
     </span>
   )
 }
+
+export const FxRateNote = memo(FxRateNoteComponent)

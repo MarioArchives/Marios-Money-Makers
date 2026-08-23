@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { RangeSelectorProps } from './RangeSelector.props'
 import { HISTORY_RANGES, type HistoryRange } from '../../../api/types'
 import './RangeSelector.css'
@@ -16,7 +17,7 @@ export const RANGE_LABELS: Record<HistoryRange, string> = {
  * `onChange`. Where the selection lives (URL, state) is the caller's
  * business — this component never touches the router or any query.
  */
-export function RangeSelector({ value, onChange }: RangeSelectorProps): JSX.Element {
+function RangeSelectorComponent({ value, onChange }: RangeSelectorProps): JSX.Element {
   return (
     <div className="range-selector" role="group" aria-label="History range" data-testid="range-selector">
       {HISTORY_RANGES.map((range) => {
@@ -38,3 +39,6 @@ export function RangeSelector({ value, onChange }: RangeSelectorProps): JSX.Elem
     </div>
   )
 }
+
+/** Memoised: `onChange` from `useHistoryRange` is stable, so only a range change re-renders it. */
+export const RangeSelector = memo(RangeSelectorComponent)

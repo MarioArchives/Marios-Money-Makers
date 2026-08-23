@@ -30,6 +30,13 @@ ALPACA_SECRET_KEY = os.environ.get("SECRET", "")
 ALPACA_DATA_BASE_URL = os.environ.get(
     "ALPACA_DATA_BASE_URL", "https://data.alpaca.markets"
 )
+# The market clock (`GET /v2/clock`) lives on the *trading* API host, not
+# the data host above. Defaults to the paper-trading host, since the
+# README walks users through setting up a paper account; live keys should
+# set ALPACA_TRADING_BASE_URL=https://api.alpaca.markets.
+ALPACA_TRADING_BASE_URL = os.environ.get(
+    "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"
+)
 # Free-plan keys only have access to the IEX feed.
 ALPACA_FEED = os.environ.get("ALPACA_FEED", "iex")
 # `adjustment` query param sent on every bars request (raw|split|dividend|all).

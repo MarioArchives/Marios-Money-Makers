@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app import config, storage
-from app.alpaca_client import Bar
+from app.alpaca_client import Bar, MarketClock
 
 NOW = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -572,3 +572,245 @@ class TestFetchClaimsMigration:
 
         assert isinstance(claim_id, str) and len(claim_id) == 32
         assert self._columns() == ["tier", "ticker", "claimed_at", "claim_id"]
+
+
+class TestUpsertBarsRecordedAtGating:
+    """``recorded_at`` means "when this price was last recorded": a
+    re-upsert that brings the same price leaves the stamp alone (price and
+    stamp), only a real price change (e.g. a split re-adjusting history)
+    moves it. ``analytics`` is always refreshed (the live bar's volume keeps
+    growing)."""
+
+    def test_new_row_is_stamped_with_the_given_recorded_at(self):
+        storage.init_db()
+        storage.upsert_bars("month", "AAPL", [_bar(_iso(NOW), 100.0)], _iso(NOW))
+
+        rows = _rows("bars_month")
+        assert len(rows) == 1
+        assert rows[0][4] == _iso(NOW)
+
+    def test_same_price_keeps_recorded_at_but_refreshes_analytics(self):
+        storage.init_db()
+        ts = _iso(NOW - timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(ts, 100.0)], _iso(NOW))
+
+        later = _iso(NOW + timedelta(days=1))
+        same_price_more_volume = Bar(
+            ts=ts,
+            price=100.0,
+            analytics=json.dumps(
+                {"o": 100.0, "h": 100.0, "l": 100.0, "c": 100.0, "v": 999, "vw": 100.0, "n": 9}
+            ),
+        )
+        storage.upsert_bars("month", "AAPL", [same_price_more_volume], later)
+
+        rows = _rows("bars_month")
+        assert len(rows) == 1
+        _, price, analytics, _, recorded_at = rows[0]
+        assert price == pytest.approx(100.0)
+        assert json.loads(analytics)["v"] == 999  # analytics refreshed
+        assert recorded_at == _iso(NOW)  # stamp untouched
+
+    def test_changed_price_replaces_price_analytics_and_recorded_at(self):
+        storage.init_db()
+        ts = _iso(NOW - timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(ts, 200.0)], _iso(NOW))
+
+        later = _iso(NOW + timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(ts, 50.0)], later)  # 4:1 split
+
+        rows = _rows("bars_month")
+        assert len(rows) == 1
+        _, price, analytics, _, recorded_at = rows[0]
+        assert price == pytest.approx(50.0)
+        assert json.loads(analytics)["c"] == pytest.approx(50.0)
+        assert recorded_at == later
+
+    def test_mixed_batch_restamps_only_the_changed_rows(self):
+        storage.init_db()
+        t0 = _iso(NOW - timedelta(days=2))
+        t1 = _iso(NOW - timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(t0, 100.0), _bar(t1, 101.0)], _iso(NOW))
+
+        later = _iso(NOW + timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(t0, 100.0), _bar(t1, 202.0)], later)
+
+        by_ts = {row[3]: row for row in _rows("bars_month")}
+        assert by_ts[t0][4] == _iso(NOW)
+        assert by_ts[t1][4] == later
+        assert by_ts[t1][1] == pytest.approx(202.0)
+
+    def test_gating_applies_to_every_tier(self):
+        storage.init_db()
+        ts = _iso(NOW - timedelta(minutes=1))
+        later = _iso(NOW + timedelta(minutes=1))
+        for tier in storage.TIERS:
+            storage.upsert_bars(tier, "AAPL", [_bar(ts, 100.0)], _iso(NOW))
+            storage.upsert_bars(tier, "AAPL", [_bar(ts, 100.0)], later)
+            assert _rows(f"bars_{tier}")[0][4] == _iso(NOW), tier
+
+
+class TestOldestTs:
+    def test_returns_min_ts_for_ticker_and_tier(self):
+        storage.init_db()
+        t0 = _iso(NOW - timedelta(days=3 * 365))
+        t1 = _iso(NOW - timedelta(days=1))
+        storage.upsert_bars("month", "AAPL", [_bar(t1, 1.0), _bar(t0, 1.0)], _iso(NOW))
+        storage.upsert_bars("month", "MSFT", [_bar(_iso(NOW - timedelta(days=9 * 365)), 1.0)], _iso(NOW))
+        storage.upsert_bars("hour", "AAPL", [_bar(_iso(NOW - timedelta(days=20)), 1.0)], _iso(NOW))
+
+        assert storage.oldest_ts("month", "AAPL") == t0
+        assert storage.oldest_ts("hour", "AAPL") == _iso(NOW - timedelta(days=20))
+
+    def test_none_when_no_rows_for_ticker(self):
+        storage.init_db()
+        storage.upsert_bars("month", "MSFT", [_bar(_iso(NOW), 1.0)], _iso(NOW))
+        assert storage.oldest_ts("month", "AAPL") is None
+
+    def test_none_when_db_missing(self):
+        assert storage.oldest_ts("month", "AAPL") is None
+
+    def test_none_when_table_missing(self):
+        # DB file exists (fetch_log only), bar table for the tier does not.
+        storage.record_fetch("summaries", "*", _iso(NOW))
+        with _connect() as conn:
+            conn.execute("DROP TABLE IF EXISTS bars_month")
+            conn.commit()
+        assert storage.oldest_ts("month", "AAPL") is None
+
+    def test_rejects_unknown_tier(self):
+        with pytest.raises(ValueError):
+            storage.oldest_ts("weekly", "AAPL")
+
+
+# --- market clock in `meta` ---------------------------------------------------
+
+CLOCK = MarketClock(
+    timestamp="2026-08-20T11:59:30Z",
+    is_open=False,
+    next_open="2026-08-20T13:30:00Z",
+    next_close="2026-08-20T20:00:00Z",
+)
+
+
+class TestMarketClockMeta:
+    """The latest Alpaca clock lives in the `meta` table under one key
+    (`MARKET_CLOCK_META_KEY`), as JSON, with the fetch stamp alongside."""
+
+    def test_key_name(self):
+        assert storage.MARKET_CLOCK_META_KEY == "market_clock"
+
+    def test_none_when_db_missing(self):
+        assert storage.get_market_clock() is None
+
+    def test_none_when_key_missing(self):
+        storage.init_db()
+        assert storage.get_market_clock() is None
+
+    def test_set_then_get_round_trips_every_field(self):
+        storage.set_market_clock(CLOCK, fetched_at=_iso(NOW))
+
+        assert storage.get_market_clock() == storage.StoredClock(
+            timestamp="2026-08-20T11:59:30Z",
+            is_open=False,
+            next_open="2026-08-20T13:30:00Z",
+            next_close="2026-08-20T20:00:00Z",
+            fetched_at=_iso(NOW),
+        )
+
+    def test_stored_as_one_json_meta_row_and_overwritten(self):
+        storage.set_market_clock(CLOCK, fetched_at=_iso(NOW))
+        later = MarketClock(
+            timestamp="2026-08-20T13:30:05Z",
+            is_open=True,
+            next_open="2026-08-21T13:30:00Z",
+            next_close="2026-08-20T20:00:00Z",
+        )
+        storage.set_market_clock(later, fetched_at=_iso(NOW + timedelta(minutes=91)))
+
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (storage.MARKET_CLOCK_META_KEY,)
+            ).fetchall()
+        assert len(rows) == 1
+        value = json.loads(rows[0][0])
+        assert value["is_open"] is True
+        assert value["fetched_at"] == _iso(NOW + timedelta(minutes=91))
+        stored = storage.get_market_clock()
+        assert stored is not None
+        assert stored.is_open is True
+        assert stored.next_open == "2026-08-21T13:30:00Z"
+        assert stored.fetched_at == _iso(NOW + timedelta(minutes=91))
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "not json",
+            json.dumps(["a", "list"]),
+            json.dumps({"is_open": True}),  # missing the other fields
+            json.dumps(
+                {
+                    "timestamp": "2026-08-20T11:59:30Z",
+                    "is_open": "false",  # wrong type
+                    "next_open": "2026-08-20T13:30:00Z",
+                    "next_close": "2026-08-20T20:00:00Z",
+                    "fetched_at": _iso(NOW),
+                }
+            ),
+        ],
+    )
+    def test_corrupt_value_is_none_not_an_exception(self, raw):
+        storage.set_meta(storage.MARKET_CLOCK_META_KEY, raw)
+
+        assert storage.get_market_clock() is None
+
+    def test_other_meta_keys_are_untouched(self):
+        storage.set_meta("bars_adjustment", "split")
+        storage.set_market_clock(CLOCK, fetched_at=_iso(NOW))
+
+        assert storage.get_meta("bars_adjustment") == "split"
+        with _connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0]
+        assert count == 2
+
+
+class TestClockLease:
+    """The clock fetch takes the same cross-process lease as the summaries
+    batch, under the pseudo-pair (CLOCK_TIER, CLOCK_KEY) -- which is a lease
+    key only, never a bars table."""
+
+    def test_clock_pseudo_pair_constants(self):
+        assert storage.CLOCK_TIER == "clock"
+        assert storage.CLOCK_KEY == "*"
+        assert storage.CLOCK_TIER not in storage.TIERS
+
+    def test_clock_pair_can_be_leased_and_released(self):
+        claim_id = storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10)
+        assert claim_id is not None
+        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is None
+        assert storage.release_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, claim_id) is True
+        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is not None
+
+    def test_clock_lease_is_independent_of_the_summaries_lease(self):
+        summaries_claim = storage.try_claim("summaries", "*", _iso(NOW), 10)
+        assert summaries_claim is not None
+        assert storage.try_claim(storage.CLOCK_TIER, storage.CLOCK_KEY, _iso(NOW), 10) is not None
+
+    def test_clock_is_not_a_bars_tier(self):
+        storage.init_db()
+        with _connect() as conn:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        assert "bars_clock" not in tables
+        with pytest.raises(ValueError):
+            storage.upsert_bars("clock", "*", [], _iso(NOW))
+        with pytest.raises(ValueError):
+            storage.oldest_ts("clock", "*")
+
+    def test_unknown_tier_still_rejected_by_lease_helpers(self):
+        with pytest.raises(ValueError):
+            storage.try_claim("weekly", "AAPL", _iso(NOW), 10)
+        with pytest.raises(ValueError):
+            storage.release_claim("weekly", "AAPL", "abc")

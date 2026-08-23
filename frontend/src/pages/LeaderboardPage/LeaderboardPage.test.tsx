@@ -3,12 +3,13 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UseQueryResult } from '@tanstack/react-query'
 import { LeaderboardPage } from './LeaderboardPage'
-import { useStocksQuery } from '../../api/queries'
+import { useMarketClockQuery, useStocksQuery } from '../../api/queries'
 import { CONNECTION_LOST_MESSAGE } from '../../components/shared/ConnectionBanner/ConnectionBanner'
-import type { StockSummary, StocksResponse } from '../../api/types'
+import type { MarketClockResponse, StockSummary, StocksResponse } from '../../api/types'
 
 vi.mock('../../api/queries', () => ({
   useStocksQuery: vi.fn(),
+  useMarketClockQuery: vi.fn(),
 }))
 
 // Isolate the page from StockTable's own rendering/implementation status —
@@ -23,6 +24,7 @@ vi.mock('../../components/leaderboard/StockTable/StockTable', () => ({
 }))
 
 const mockedUseStocksQuery = vi.mocked(useStocksQuery)
+const mockedUseMarketClockQuery = vi.mocked(useMarketClockQuery)
 
 function makeStock(overrides: Partial<StockSummary> = {}): StockSummary {
   return {
@@ -65,6 +67,18 @@ function renderPage() {
 describe('LeaderboardPage', () => {
   beforeEach(() => {
     mockedUseStocksQuery.mockReset()
+    // The MarketStatusBanner reads the clock query; while it is loading the
+    // banner renders nothing, which keeps these page tests about the board.
+    mockedUseMarketClockQuery.mockReset()
+    mockedUseMarketClockQuery.mockReturnValue({
+      data: undefined,
+      error: null,
+      isLoading: true,
+      isPending: true,
+      isSuccess: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as unknown as UseQueryResult<MarketClockResponse, Error>)
   })
 
   it('renders a loading state while the query is pending', () => {
@@ -189,6 +203,28 @@ describe('LeaderboardPage', () => {
 })
 
 describe('LeaderboardPage market status banner', () => {
+  // These tests are about the page composition, so the clock query is
+  // resolved (the banner renders nothing until it is).
+  beforeEach(() => {
+    mockedUseMarketClockQuery.mockReturnValue({
+      data: {
+        timestamp: '2026-08-19T12:00:00Z',
+        is_open: false,
+        next_open: '2199-01-02T14:30:00Z',
+        next_close: '2199-01-02T21:00:00Z',
+        fetched_at: '2026-08-19T12:00:00Z',
+        is_stale: false,
+        error: null,
+      },
+      error: null,
+      isLoading: false,
+      isPending: false,
+      isSuccess: true,
+      isError: false,
+      refetch: vi.fn(),
+    } as unknown as UseQueryResult<MarketClockResponse, Error>)
+  })
+
   it('shows the market-open countdown as the first thing on the loaded page', () => {
     mockedUseStocksQuery.mockReturnValue(
       queryResult({

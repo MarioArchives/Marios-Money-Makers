@@ -8,6 +8,19 @@
   white-space: nowrap;
 }
 
+.flashing {
+  animation: flashWeight 1s ease-out;
+}
+
+@keyframes flashWeight {
+  0% {
+    font-weight: 1000;
+  }
+  100% {
+    font-weight: 500;
+  }
+}
+
 .change-indicator__arrow {
   font-size: 0.6em;
   line-height: 1;

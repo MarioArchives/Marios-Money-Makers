@@ -44,6 +44,19 @@ class StoredBar(BaseModel):
     recorded_at: str
 
 
+class MarketClockResponse(BaseModel):
+    """`GET /api/market/clock` response: Alpaca's market clock plus cache
+    metadata (`fetched_at`/`is_stale`/`error`)."""
+
+    timestamp: str
+    is_open: bool
+    next_open: str
+    next_close: str
+    fetched_at: str
+    is_stale: bool
+    error: str | None = None
+
+
 class StoredDataResponse(BaseModel):
     """Everything the SQLite store holds for one ticker in one tier."""
 

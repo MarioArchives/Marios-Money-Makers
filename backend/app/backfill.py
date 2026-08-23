@@ -7,7 +7,10 @@ most of the 20 tickers' history is frozen or empty. :func:`sweep` first
 refreshes the leaderboard's ``summaries`` table if it is stale
 (:func:`app.routers.stocks.refresh_summaries` -- one snapshots call, so a
 restarted backend has a populated board before any browser polls), then
-walks every (tier, ticker) pair -- tier-major, so all the cheap minute
+refreshes the cached Alpaca market clock if it is stale
+(:func:`app.routers.market.refresh_clock` -- into the ``meta`` table, same
+fresh-skipping single-flight shape; a clock outage is logged and never
+stops the rest of the pass), then walks every (tier, ticker) pair -- tier-major, so all the cheap minute
 bars land before the hourly and daily ones -- and, for each pair whose
 ``fetch_log`` entry has lapsed past the tier's freshness window, calls
 :func:`app.routers.stocks.refresh_history`: the very same lock + lease +
@@ -35,6 +38,7 @@ import logging
 
 from app import config
 from app.alpaca_client import AlpacaError
+from app.routers import market as market_router
 from app.routers import stocks as stocks_router
 from app.storage import TIERS
 from app.tickers import TICKER_SYMBOLS
@@ -82,14 +86,34 @@ async def _refresh_summaries() -> None:
         logger.exception("backfill: unexpected error refreshing summaries")
 
 
+async def _refresh_clock() -> None:
+    """Refresh the cached market clock (`meta`) if stale; never raises.
+
+    ``market_router.refresh_clock`` already swallows ``AlpacaError``
+    (logged at WARNING); this wrapper only guards against an unexpected
+    non-Alpaca failure, matching ``_refresh_summaries``.
+    """
+    try:
+        await market_router.refresh_clock()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - the sweep must never crash
+        logger.exception("backfill: unexpected error refreshing market clock")
+
+
 async def sweep() -> None:
-    """One pass: refresh the leaderboard table, then every stale (tier, ticker) pair."""
+    """One pass: refresh the leaderboard table, the market clock, then
+    every stale (tier, ticker) pair."""
     logger.info("backfill: sweep starting")
     # Leaderboard first: after a restart this repopulates the `summaries`
     # table (one snapshots call) before any browser polls. Fresh-skipping
     # and single-flight like everything else, so a concurrent request
     # can't make it double-fetch.
     await _refresh_summaries()
+    # Market clock next: same fresh-skipping single-flight refresh, into
+    # `meta` instead of a bar table. A clock outage is logged and never
+    # stops the pair refreshes below.
+    await _refresh_clock()
     for tier in TIERS:
         _timeframe, _window, freshness = stocks_router._SPEC_BY_TIER[tier]
         for ticker in TICKER_SYMBOLS:

@@ -63,9 +63,15 @@ Three endpoints:
 
   ``all`` is the all-time view: the daily tier is never pruned, so the
   response carries *every* stored daily bar for the ticker (no time
-  window on the read); only the Alpaca fetch is bounded, backfilling
-  ``MONTH_BACKFILL_DAYS`` on the first fetch. The series therefore grows
-  by one bar per trading day for as long as the store lives.
+  window on the read). The Alpaca fetch is bounded to
+  ``MONTH_BACKFILL_DAYS`` on the first fetch, but on every later refresh it
+  also reaches back to the oldest stored daily bar (:func:`_fetch_start`),
+  so a row that has aged out of that window is still re-checked -- no
+  straggler is left behind un-refreshed, and a split that re-adjusts old
+  history is picked up. One paginated ``1Day`` request comfortably covers
+  even a multi-year reach-back (252 bars/year, 1000 bars per Alpaca page).
+  The series therefore grows by one bar per trading day for as long as the
+  store lives.
 - ``GET /api/stocks/{ticker}/stored?tier=minute|hour|month`` — raw
   inspection of the SQLite store for one ticker: every row of the tier's
   table (all columns, ``analytics`` JSON parsed, no time window, oldest
@@ -151,10 +157,13 @@ _refresh_locks: dict[str, asyncio.Lock] = {}
 NO_DATA_ERROR = f"{alpaca_client.ERROR_PREFIX}: no data yet"
 
 # range query param -> (tier, Alpaca timeframe, fetch window, freshness
-# seconds, response `interval` label). The fetch window bounds the Alpaca
-# request (`start = now - window`); the *read* window is the same for the
-# pruned tiers but unbounded for the never-pruned daily tier (see
-# `_read_since`), which is what makes `all` grow over time.
+# seconds, response `interval` label). The fetch window normally bounds the
+# Alpaca request (`start = now - window`), but for the never-pruned daily
+# tier `_fetch_start` widens that lower bound back to the oldest stored row
+# so no bar is left un-refreshed once it ages past the window (see
+# `_UNBOUNDED_READ_TIERS`). The *read* window is the same for the pruned
+# tiers but unbounded for the never-pruned daily tier (see `_read_since`),
+# which is what makes `all` grow over time.
 _TIER_BY_RANGE: dict[str, tuple[str, str, timedelta, float, str]] = {
     "1d": (
         "minute",
@@ -194,7 +203,10 @@ HistoryRange = Literal["1d", "30d", "all"]
 
 # Tiers whose read is unbounded: every stored row is served. Only the daily
 # tier qualifies (it is never pruned); the minute/hour tiers are read over
-# their retention window, which `prune` keeps in step anyway.
+# their retention window, which `prune` keeps in step anyway. Also drives
+# `_fetch_start`: the same tiers get their Alpaca fetch widened back to the
+# oldest stored row, so nothing served by the unbounded read is ever left
+# un-refreshed.
 _UNBOUNDED_READ_TIERS = frozenset({"month"})
 
 StoredTier = Literal["minute", "hour", "month"]
@@ -229,6 +241,28 @@ def _read_since(tier: str, window: timedelta, now: datetime) -> str:
     if tier in _UNBOUNDED_READ_TIERS:
         return ""
     return _iso(now - window)
+
+
+def _fetch_start(tier: str, ticker: str, window: timedelta, now: datetime) -> datetime:
+    """Lower bound for the Alpaca fetch ``start`` for ``(ticker, tier)``.
+
+    For the never-pruned daily tier (see ``_UNBOUNDED_READ_TIERS``), widens
+    the plain ``now - window`` start back to ``storage.oldest_ts`` when a
+    row is stored older than the window -- so a bar that has aged out of
+    the backfill window is still re-checked on every refresh (no
+    straggler), and a corporate action that re-adjusts old history is
+    picked up. Falls back to ``now - window`` when nothing is stored yet or
+    the stored timestamp doesn't parse. Other tiers are unaffected.
+    """
+    if tier not in _UNBOUNDED_READ_TIERS:
+        return now - window
+    oldest = storage.oldest_ts(tier, ticker)
+    if oldest is None:
+        return now - window
+    oldest_dt = _parse_iso(oldest)
+    if oldest_dt is None:
+        return now - window
+    return min(now - window, oldest_dt)
 
 
 def _is_history_fresh(tier: str, ticker: str, freshness: float) -> bool:
@@ -380,6 +414,11 @@ async def refresh_history(ticker: str, tier: str) -> bool:
     and prunes. The lease is released in all cases once the fetch is over.
     Returns ``True`` when a fetch happened.
 
+    The fetch's ``start`` comes from :func:`_fetch_start`, not a plain
+    ``now - window``: for the never-pruned month tier it reaches back to
+    the oldest stored daily bar so no row is left un-refreshed once it ages
+    past the ordinary backfill window.
+
     :class:`app.alpaca_client.AlpacaError` propagates: the caller decides
     whether the DB can cover for the outage (the endpoint serves stale
     rows; the sweep logs and moves on). Nothing is written on failure, so
@@ -404,8 +443,9 @@ async def refresh_history(ticker: str, tier: str) -> bool:
             # will land in the shared DB. Serve what we have.
             return False
         try:
+            start = _fetch_start(tier, ticker, window, now)
             bars = await asyncio.to_thread(
-                alpaca_client.fetch_bars, ticker, timeframe, now - window
+                alpaca_client.fetch_bars, ticker, timeframe, start
             )
 
             recorded_at = _iso(now)

@@ -11,13 +11,23 @@ identical schema, one per retention tier:
         price       REAL NOT NULL,   -- bar close
         analytics   TEXT NOT NULL,   -- JSON: {"o","h","l","c","v","vw","n"}
         ts          TEXT NOT NULL,   -- bar time, ISO-8601 UTC ("...Z")
-        recorded_at TEXT NOT NULL,   -- when we fetched it, ISO-8601 UTC
+        recorded_at TEXT NOT NULL,   -- when this row's price was last
+                                     -- recorded, ISO-8601 UTC
         PRIMARY KEY (ticker, ts)
     );
 
 The composite primary key is the upsert target (re-fetching an overlapping
 window must never duplicate rows) and covers the ``(ticker, ts)`` range
-scans; no other index is needed at this scale.
+scans; no other index is needed at this scale. ``recorded_at`` means "when
+this row's ``price`` was last recorded/changed", not "when we last fetched
+it": ``upsert_bars`` only moves the stamp when the incoming ``price``
+differs from what is stored, so a refetch that returns the same price
+(e.g. the leaderboard's ~20s minute-bar poll re-upserting an unchanged
+close) leaves ``recorded_at`` untouched, while a real price change --
+including a corporate action (e.g. a split) that re-adjusts historical
+bars -- restamps every row whose price changed. ``analytics`` (and
+``price`` itself) are always refreshed regardless, since a live bar's
+volume keeps growing even when its close hasn't moved yet.
 
 A fourth table, ``fetch_log``, records when each ``(tier, ticker)`` was
 last *successfully fetched from Alpaca* (one row per pair, upserted):
@@ -33,12 +43,14 @@ last *successfully fetched from Alpaca* (one row per pair, upserted):
 
 It is what the history endpoint's freshness check reads. Deriving
 freshness from the bar rows' ``recorded_at`` would be wrong for the minute
-tier: the leaderboard poll upserts each ticker's latest minute bar every
-~20s, which would make the tier look perpetually fresh and suppress the
-intraday backfill. A legitimately-empty fetch also stores no bars but is
-still a fetch, so it is logged here too. The leaderboard's snapshots
-fetch is stamped in the same table under the pseudo-pair
-``(tier='summaries', ticker='*')`` (:data:`SUMMARIES_TIER` /
+tier: even though an unchanged-price re-upsert now leaves ``recorded_at``
+alone (see above), a genuine price tick still moves it, and the
+leaderboard poll upserts each ticker's latest minute bar every ~20s --
+using it for freshness would make the tier look perpetually fresh on any
+active ticker and suppress the intraday backfill. A legitimately-empty
+fetch also stores no bars but is still a fetch, so it is logged here too.
+The leaderboard's snapshots fetch is stamped in the same table under the
+pseudo-pair ``(tier='summaries', ticker='*')`` (:data:`SUMMARIES_TIER` /
 :data:`SUMMARIES_KEY`).
 
 A fifth table, ``summaries``, is the leaderboard's CURRENT-STATE store:
@@ -102,8 +114,8 @@ bookkeeping (``get_meta`` / ``set_meta``):
         value TEXT
     );
 
-Its one current key is ``bars_adjustment``: the Alpaca ``adjustment``
-mode (``raw|split|dividend|all``) the stored bars were fetched with.
+One key is ``bars_adjustment``: the Alpaca ``adjustment`` mode
+(``raw|split|dividend|all``) the stored bars were fetched with.
 ``ensure_bars_adjustment(adjustment)`` (called from the app lifespan right
 after ``init_db``) compares it with the configured mode and, when they
 differ -- or the key is missing while any bars table already has rows,
@@ -113,6 +125,15 @@ stamp) and records the new mode. Stamp-less tiers are stale, so the next
 chart request / backfill sweep refetches them and ``upsert_bars``
 overwrites the old rows in place. This runs exactly once per change; a
 fresh empty DB just records the mode.
+
+Another key, ``market_clock`` (:data:`MARKET_CLOCK_META_KEY`), holds the
+latest Alpaca market clock (``GET /v2/clock``) as one JSON blob --
+``{"timestamp", "is_open", "next_open", "next_close", "fetched_at"}`` --
+written/read via :func:`set_market_clock` / :func:`get_market_clock`. The
+clock fetch is leased under the pseudo-pair ``(CLOCK_TIER, CLOCK_KEY)`` in
+``fetch_claims`` exactly like the bar tiers and ``summaries``, even though
+``CLOCK_TIER`` is deliberately absent from :data:`TIERS` -- there is no
+``bars_clock`` table, only a lease key.
 
 Retention: ``prune(now)`` deletes ``bars_minute`` rows whose ``ts`` is
 older than 24 hours and ``bars_hour`` rows older than 30 days (strictly
@@ -135,6 +156,7 @@ synchronously inside request handlers.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3  # noqa: F401 - used by the implementation
@@ -144,7 +166,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app import config  # noqa: F401 - DB_PATH read at call time
-from app.alpaca_client import Bar
+from app.alpaca_client import Bar, MarketClock
 
 # Tier names; the table for a tier is f"bars_{tier}".
 TIERS = ("minute", "hour", "month")
@@ -154,11 +176,87 @@ TIERS = ("minute", "hour", "month")
 SUMMARIES_TIER = "summaries"
 SUMMARIES_KEY = "*"
 
-# Every tier accepted by the fetch_log / fetch_claims helpers.
-_FETCH_TIERS = (*TIERS, SUMMARIES_TIER)
-
 # `meta` key recording which Alpaca `adjustment` mode the stored bars carry.
 BARS_ADJUSTMENT_META_KEY = "bars_adjustment"
+
+# `meta` key under which the latest Alpaca market clock is cached, as one
+# JSON blob (see StoredClock). Pseudo-(tier, ticker) under which the clock
+# fetch is leased in `fetch_claims` -- a lease key only, never a bars
+# table (CLOCK_TIER is in _FETCH_TIERS but deliberately NOT in TIERS).
+MARKET_CLOCK_META_KEY = "market_clock"
+CLOCK_TIER = "clock"
+CLOCK_KEY = "*"
+
+# Every tier accepted by the fetch_log / fetch_claims helpers.
+_FETCH_TIERS = (*TIERS, SUMMARIES_TIER, CLOCK_TIER)
+
+
+@dataclass(frozen=True)
+class StoredClock:
+    """The `meta` table's cached Alpaca market clock, plus when it was
+    fetched."""
+
+    timestamp: str
+    is_open: bool
+    next_open: str
+    next_close: str
+    fetched_at: str
+
+
+def set_market_clock(clock: MarketClock, fetched_at: str) -> None:
+    """Upsert the cached market clock (`meta[MARKET_CLOCK_META_KEY]`) as one
+    JSON blob, overwriting whatever was stored before."""
+    set_meta(
+        MARKET_CLOCK_META_KEY,
+        json.dumps(
+            {
+                "timestamp": clock.timestamp,
+                "is_open": clock.is_open,
+                "next_open": clock.next_open,
+                "next_close": clock.next_close,
+                "fetched_at": fetched_at,
+            }
+        ),
+    )
+
+
+def get_market_clock() -> StoredClock | None:
+    """Return the cached market clock, or None if missing/corrupt.
+
+    None (never a raised exception) when the DB/table/key is missing, the
+    stored value isn't valid JSON, isn't a JSON object, is missing any of
+    the five expected fields, or has a wrong-typed field (`is_open` not a
+    bool, or one of the string fields not a string).
+    """
+    raw = get_meta(MARKET_CLOCK_META_KEY)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+
+    is_open = value.get("is_open")
+    if "is_open" not in value or not isinstance(is_open, bool):
+        return None
+
+    strings: dict[str, str] = {}
+    for key in ("timestamp", "next_open", "next_close", "fetched_at"):
+        field_value = value.get(key)
+        if key not in value or not isinstance(field_value, str):
+            return None
+        strings[key] = field_value
+
+    return StoredClock(
+        timestamp=strings["timestamp"],
+        is_open=is_open,
+        next_open=strings["next_open"],
+        next_close=strings["next_close"],
+        fetched_at=strings["fetched_at"],
+    )
+
 
 logger = logging.getLogger("app.storage")
 
@@ -396,8 +494,16 @@ def ensure_bars_adjustment(adjustment: str) -> bool:
 def upsert_bars(tier: str, ticker: str, bars: list[Bar], recorded_at: str) -> None:
     """Insert ``bars`` for ``ticker``, updating on ``(ticker, ts)`` conflict.
 
-    A conflicting row gets its ``price``, ``analytics`` and ``recorded_at``
-    replaced (the current month's bar keeps mutating until month end).
+    A conflicting row always gets its ``price`` and ``analytics`` replaced
+    (the current month's bar keeps mutating until month end, and a live
+    bar's volume keeps growing even between price ticks), but
+    ``recorded_at`` only moves when the incoming ``price`` actually differs
+    from what is stored -- so ``recorded_at`` tracks "when this price was
+    last recorded", not "when we last fetched". A same-price re-upsert
+    (e.g. the leaderboard's ~20s minute-bar poll re-writing an unchanged
+    close) leaves the existing stamp in place; a real price change --
+    including a split re-adjusting historical bars -- restamps the row
+    with ``recorded_at``.
     """
     table = _table(tier)
     Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +515,9 @@ def upsert_bars(tier: str, ticker: str, bars: list[Bar], recorded_at: str) -> No
             "ON CONFLICT(ticker, ts) DO UPDATE SET "
             "price=excluded.price, "
             "analytics=excluded.analytics, "
-            "recorded_at=excluded.recorded_at",
+            "recorded_at = CASE WHEN "
+            f"{table}.price IS excluded.price "
+            f"THEN {table}.recorded_at ELSE excluded.recorded_at END",
             [(ticker, bar.price, bar.analytics, bar.ts, recorded_at) for bar in bars],
         )
         conn.commit()
@@ -484,6 +592,27 @@ def latest_recorded_at(tier: str, ticker: str) -> str | None:
         with _connect() as conn:
             row = conn.execute(
                 f"SELECT MAX(recorded_at) FROM {table} WHERE ticker = ?",
+                (ticker,),
+            ).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def oldest_ts(tier: str, ticker: str) -> str | None:
+    """Return ``MIN(ts)`` for ``ticker`` in ``tier``, or None if no rows.
+
+    Used to widen the month tier's Alpaca fetch back to the oldest stored
+    daily bar (see ``routers.stocks._fetch_start``) so rows that have aged
+    out of the backfill window are still re-checked on every refresh.
+    """
+    table = _table(tier)  # validates tier even when the DB file is missing
+    if not os.path.exists(config.DB_PATH):
+        return None
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                f"SELECT MIN(ts) FROM {table} WHERE ticker = ?",
                 (ticker,),
             ).fetchone()
         return row[0] if row else None

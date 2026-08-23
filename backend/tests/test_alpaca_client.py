@@ -18,7 +18,7 @@ import httpx
 import pytest
 
 from app import alpaca_client, config
-from app.alpaca_client import AlpacaError, Bar
+from app.alpaca_client import AlpacaError, Bar, MarketClock
 from app.tickers import TICKERS_BY_SYMBOL
 
 START = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -29,6 +29,9 @@ def _fake_credentials(monkeypatch):
     monkeypatch.setattr(config, "ALPACA_KEY_ID", "test-key-id")
     monkeypatch.setattr(config, "ALPACA_SECRET_KEY", "test-secret")
     monkeypatch.setattr(config, "ALPACA_DATA_BASE_URL", "https://data.alpaca.test")
+    monkeypatch.setattr(
+        config, "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.test"
+    )
     monkeypatch.setattr(config, "ALPACA_FEED", "iex")
     monkeypatch.setattr(config, "ALPACA_BARS_ADJUSTMENT", "split")
     yield
@@ -96,6 +99,18 @@ class TestNormalizeTimestamp:
         assert (
             alpaca_client.normalize_timestamp("2026-08-19T13:30:00+00:00")
             == "2026-08-19T13:30:00Z"
+        )
+
+    def test_non_utc_offset_is_converted_to_utc_not_relabelled(self):
+        # Alpaca's clock stamps carry New York offsets ("-04:00"); the
+        # instant must be converted, not just have its suffix swapped.
+        assert (
+            alpaca_client.normalize_timestamp("2026-08-19T14:15:22-04:00")
+            == "2026-08-19T18:15:22Z"
+        )
+        assert (
+            alpaca_client.normalize_timestamp("2026-11-27T13:00:00.5-05:00")
+            == "2026-11-27T18:00:00Z"
         )
 
     def test_normalized_strings_sort_chronologically(self):
@@ -405,3 +420,429 @@ class TestFetchBars:
 
         with pytest.raises(AlpacaError):
             alpaca_client.fetch_bars("AAPL", alpaca_client.TIMEFRAME_MINUTE, START)
+
+
+def _bars_body(*bars: dict, symbol: str = "AAPL", next_page_token=None) -> dict:
+    return {"bars": list(bars), "symbol": symbol, "next_page_token": next_page_token}
+
+
+def _fetch_aapl_minute() -> list[Bar]:
+    return alpaca_client.fetch_bars("AAPL", alpaca_client.TIMEFRAME_MINUTE, START)
+
+
+def _assert_malformed(exc_info) -> None:
+    err = exc_info.value
+    assert isinstance(err, AlpacaError)
+    assert err.is_rate_limit is False
+    assert str(err).startswith(alpaca_client.ERROR_PREFIX)
+    assert "malformed" in str(err).lower()
+
+
+class TestFetchBarsValidation:
+    """A 200 whose body/entries do not match Alpaca's documented bars shape
+    is an `AlpacaError` (served stale by callers) -- never a bare
+    `ValueError`/`KeyError`/`TypeError`, and never junk in SQLite."""
+
+    def test_non_json_body_raises_alpaca_error(self, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, content=b"<html>maintenance</html>", headers={"content-type": "text/html"}
+            ),
+        )
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_json_array_body_raises_alpaca_error(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(200, json=[]))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_bars_that_is_not_a_list_raises(self, monkeypatch):
+        body = {"bars": _raw_bar("2026-08-19T13:30:00Z", 1.0), "next_page_token": None}
+        _install(monkeypatch, lambda request: httpx.Response(200, json=body))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_null_or_absent_bars_is_still_a_legitimate_empty_result(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(200, json={"bars": None, "symbol": "AAPL"}))
+        assert _fetch_aapl_minute() == []
+
+        _install(monkeypatch, lambda request: httpx.Response(200, json={"symbol": "AAPL"}))
+        assert _fetch_aapl_minute() == []
+
+    @pytest.mark.parametrize("missing", ["t", "o", "h", "l", "c", "v", "vw", "n"])
+    def test_bar_missing_a_required_field_raises(self, monkeypatch, missing):
+        bar = _raw_bar("2026-08-19T13:30:00Z", 310.85)
+        del bar[missing]
+        _install(monkeypatch, lambda request: httpx.Response(200, json=_bars_body(bar)))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    @pytest.mark.parametrize("bad_close", ["310.85", True, None, [310.85]])
+    def test_bar_with_non_numeric_close_raises(self, monkeypatch, bad_close):
+        bar = _raw_bar("2026-08-19T13:30:00Z", 310.85)
+        bar["c"] = bad_close
+        _install(monkeypatch, lambda request: httpx.Response(200, json=_bars_body(bar)))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_bar_with_non_finite_number_raises(self, monkeypatch):
+        # Python's json module happily emits/parses the non-standard NaN token.
+        raw = json.dumps(_bars_body(_raw_bar("2026-08-19T13:30:00Z", float("nan"))))
+        assert "NaN" in raw
+        _install(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, content=raw.encode(), headers={"content-type": "application/json"}
+            ),
+        )
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_bar_with_unparseable_timestamp_raises(self, monkeypatch):
+        bar = _raw_bar("yesterday-ish", 310.85)
+        _install(monkeypatch, lambda request: httpx.Response(200, json=_bars_body(bar)))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_bar_that_is_not_an_object_raises(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(200, json=_bars_body(42)))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_symbol_mismatch_raises(self, monkeypatch):
+        body = _bars_body(_raw_bar("2026-08-19T13:30:00Z", 310.85), symbol="MSFT")
+        _install(monkeypatch, lambda request: httpx.Response(200, json=body))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+
+    def test_next_page_token_of_wrong_type_raises(self, monkeypatch):
+        body = _bars_body(_raw_bar("2026-08-19T13:30:00Z", 310.85), next_page_token=123)
+
+        # Only the first request gets the bad token; anything after it is a
+        # 500, so a client that wrongly follows the token fails fast
+        # instead of looping.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "page_token" in request.url.params:
+                return httpx.Response(500, json={})
+            return httpx.Response(200, json=body)
+
+        seen = _install(monkeypatch, handler)
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+        assert len(seen) == 1  # rejected before any follow-up request
+
+    def test_malformed_later_page_fails_the_whole_fetch(self, monkeypatch):
+        page_one = _bars_body(_raw_bar("2026-08-19T13:30:00Z", 310.85), next_page_token="tok-1")
+        bad = _raw_bar("2026-08-19T13:31:00Z", 310.61)
+        bad["c"] = "oops"
+        page_two = _bars_body(bad)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("page_token") == "tok-1":
+                return httpx.Response(200, json=page_two)
+            return httpx.Response(200, json=page_one)
+
+        seen = _install(monkeypatch, handler)
+
+        with pytest.raises(AlpacaError) as exc_info:
+            _fetch_aapl_minute()
+        _assert_malformed(exc_info)
+        assert len(seen) == 2  # it did follow the token before rejecting page two
+
+    def test_extra_unknown_keys_are_ignored(self, monkeypatch):
+        bar = _raw_bar("2026-08-19T13:30:00Z", 310.85)
+        bar["new_field"] = {"anything": True}
+        body = _bars_body(bar)
+        body["currency"] = "USD"
+        _install(monkeypatch, lambda request: httpx.Response(200, json=body))
+
+        bars = _fetch_aapl_minute()
+
+        assert [b.price for b in bars] == pytest.approx([310.85])
+        assert set(json.loads(bars[0].analytics)) == {"o", "h", "l", "c", "v", "vw", "n"}
+
+
+class TestFetchSummariesValidation:
+    """`fetch_summaries` never raises: a malformed body is an all-error
+    batch, a malformed snapshot entry is an error entry for that symbol
+    only, and a malformed `minuteBar` on an otherwise good snapshot keeps
+    the summary but is not persisted."""
+
+    def _assert_error_entry(self, summary) -> None:
+        assert summary.is_stale is True
+        assert summary.price is None
+        assert summary.error is not None
+        assert summary.error.startswith(alpaca_client.ERROR_PREFIX)
+        assert "malformed" in summary.error.lower()
+        assert not alpaca_client.is_rate_limit_error(summary.error)
+
+    def test_non_json_body_is_an_all_error_batch(self, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, content=b"<html>maintenance</html>", headers={"content-type": "text/html"}
+            ),
+        )
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL", "MSFT"])
+
+        assert set(summaries) == {"AAPL", "MSFT"}
+        for summary in summaries.values():
+            self._assert_error_entry(summary)
+        assert minute_bars == {}
+
+    def test_json_array_body_is_an_all_error_batch(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(200, json=[1, 2, 3]))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL", "MSFT"])
+
+        for summary in summaries.values():
+            self._assert_error_entry(summary)
+        assert minute_bars == {}
+
+    def test_snapshot_entry_that_is_not_an_object_is_an_error_entry_others_ok(
+        self, monkeypatch
+    ):
+        payload = {"AAPL": "nope", "MSFT": _snapshot(484.42, 481.82)}
+        _install(monkeypatch, lambda request: httpx.Response(200, json=payload))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL", "MSFT"])
+
+        self._assert_error_entry(summaries["AAPL"])
+        assert summaries["AAPL"].name == TICKERS_BY_SYMBOL["AAPL"].name
+        assert "AAPL" not in minute_bars
+        assert summaries["MSFT"].price == pytest.approx(484.42)
+        assert summaries["MSFT"].error is None
+        assert "MSFT" in minute_bars
+
+    def test_non_numeric_latest_trade_price_is_an_error_entry(self, monkeypatch):
+        snap = _snapshot(316.9, 310.16)
+        snap["latestTrade"]["p"] = "316.9"
+        payload = {"AAPL": snap, "MSFT": _snapshot(484.42, 481.82)}
+        _install(monkeypatch, lambda request: httpx.Response(200, json=payload))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL", "MSFT"])
+
+        self._assert_error_entry(summaries["AAPL"])
+        assert "AAPL" not in minute_bars
+        assert summaries["MSFT"].error is None
+
+    def test_non_numeric_previous_close_is_an_error_entry(self, monkeypatch):
+        snap = _snapshot(316.9, 310.16)
+        snap["prevDailyBar"]["c"] = True
+        _install(monkeypatch, lambda request: httpx.Response(200, json={"AAPL": snap}))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL"])
+
+        self._assert_error_entry(summaries["AAPL"])
+        assert minute_bars == {}
+
+    def test_latest_trade_without_price_still_falls_back_to_minute_bar(self, monkeypatch):
+        # Missing is not malformed: the documented fallback chain still applies.
+        snap = _snapshot(316.9, 310.16)
+        del snap["latestTrade"]["p"]
+        _install(monkeypatch, lambda request: httpx.Response(200, json={"AAPL": snap}))
+
+        summaries, _ = alpaca_client.fetch_summaries(["AAPL"])
+
+        assert summaries["AAPL"].error is None
+        assert summaries["AAPL"].price == pytest.approx(316.85)  # minuteBar.c
+
+    def test_malformed_minute_bar_keeps_summary_but_is_not_persisted(self, monkeypatch):
+        snap = _snapshot(316.9, 310.16)
+        del snap["minuteBar"]["v"]
+        payload = {"AAPL": snap, "MSFT": _snapshot(484.42, 481.82)}
+        _install(monkeypatch, lambda request: httpx.Response(200, json=payload))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL", "MSFT"])
+
+        assert summaries["AAPL"].error is None
+        assert summaries["AAPL"].price == pytest.approx(316.9)
+        assert "AAPL" not in minute_bars
+        assert "MSFT" in minute_bars
+
+    def test_minute_bar_with_bad_timestamp_keeps_summary_but_is_not_persisted(
+        self, monkeypatch
+    ):
+        snap = _snapshot(316.9, 310.16, minute_ts="not-a-time")
+        _install(monkeypatch, lambda request: httpx.Response(200, json={"AAPL": snap}))
+
+        summaries, minute_bars = alpaca_client.fetch_summaries(["AAPL"])
+
+        assert summaries["AAPL"].error is None
+        assert summaries["AAPL"].price == pytest.approx(316.9)
+        assert minute_bars == {}
+
+
+# --- market clock (trading API) ----------------------------------------------
+
+
+def _clock_body(**overrides) -> dict:
+    """Alpaca's documented `GET /v2/clock` body (New York offsets, as served)."""
+    body = {
+        "timestamp": "2026-08-19T14:15:22.123456-04:00",
+        "is_open": True,
+        "next_open": "2026-08-20T09:30:00-04:00",
+        "next_close": "2026-08-19T16:00:00-04:00",
+    }
+    body.update(overrides)
+    return body
+
+
+def _clock_handler(body) -> callable:
+    return lambda request: httpx.Response(200, json=body)
+
+
+class TestFetchClock:
+    """`fetch_clock` -> Alpaca's legacy market clock, `GET /v2/clock` on the
+    *trading* host (`ALPACA_TRADING_BASE_URL`), never the data host. Same
+    raising contract as `fetch_bars`: request failure or a malformed body is
+    an `AlpacaError`; a malformed body is never mistaken for rate limiting."""
+
+    def test_request_shape_and_normalized_result(self, monkeypatch):
+        seen = _install(monkeypatch, _clock_handler(_clock_body()))
+
+        clock = alpaca_client.fetch_clock()
+
+        assert len(seen) == 1
+        request = seen[0]
+        assert request.method == "GET"
+        assert request.url.scheme == "https"
+        assert request.url.host == "paper-api.alpaca.test"
+        assert request.url.path == "/v2/clock"
+        assert "feed" not in request.url.params
+        assert request.headers["APCA-API-KEY-ID"] == "test-key-id"
+        assert request.headers["APCA-API-SECRET-KEY"] == "test-secret"
+        # Normalised to UTC "Z" stamps: -04:00 offsets are converted.
+        assert clock == MarketClock(
+            timestamp="2026-08-19T18:15:22Z",
+            is_open=True,
+            next_open="2026-08-20T13:30:00Z",
+            next_close="2026-08-19T20:00:00Z",
+        )
+
+    def test_closed_clock_keeps_is_open_false(self, monkeypatch):
+        _install(monkeypatch, _clock_handler(_clock_body(is_open=False)))
+
+        assert alpaca_client.fetch_clock().is_open is False
+
+    def test_data_host_is_not_used(self, monkeypatch):
+        seen = _install(monkeypatch, _clock_handler(_clock_body()))
+
+        alpaca_client.fetch_clock()
+
+        assert seen[0].url.host != "data.alpaca.test"
+
+    def test_429_raises_rate_limited_alpaca_error(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(429, json={}))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        assert exc_info.value.is_rate_limit is True
+        assert alpaca_client.is_rate_limit_error(str(exc_info.value))
+
+    def test_server_error_raises_plain_alpaca_error(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(500, json={}))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        assert exc_info.value.is_rate_limit is False
+        assert str(exc_info.value).startswith(alpaca_client.ERROR_PREFIX)
+
+    def test_network_error_raises_alpaca_error(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        _install(monkeypatch, handler)
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        assert exc_info.value.is_rate_limit is False
+
+    def test_non_json_body_raises_malformed(self, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200, content=b"<html>maintenance</html>", headers={"Content-Type": "text/html"}
+            ),
+        )
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        _assert_malformed(exc_info)
+
+    def test_json_array_body_raises_malformed(self, monkeypatch):
+        _install(monkeypatch, lambda request: httpx.Response(200, json=[_clock_body()]))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        _assert_malformed(exc_info)
+
+    @pytest.mark.parametrize("field", ["timestamp", "is_open", "next_open", "next_close"])
+    def test_missing_field_raises_malformed(self, monkeypatch, field):
+        body = _clock_body()
+        del body[field]
+        _install(monkeypatch, _clock_handler(body))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        _assert_malformed(exc_info)
+        assert field in str(exc_info.value)
+
+    @pytest.mark.parametrize("bad", ["true", "open", 1, 0, None])
+    def test_is_open_that_is_not_a_bool_raises_malformed(self, monkeypatch, bad):
+        _install(monkeypatch, _clock_handler(_clock_body(is_open=bad)))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        _assert_malformed(exc_info)
+
+    @pytest.mark.parametrize("field", ["timestamp", "next_open", "next_close"])
+    @pytest.mark.parametrize("bad", [123, None, "soon", ["2026-08-19T14:15:22Z"]])
+    def test_timestamp_that_is_not_a_parseable_string_raises_malformed(
+        self, monkeypatch, field, bad
+    ):
+        _install(monkeypatch, _clock_handler(_clock_body(**{field: bad})))
+
+        with pytest.raises(AlpacaError) as exc_info:
+            alpaca_client.fetch_clock()
+
+        _assert_malformed(exc_info)
+
+    def test_extra_unknown_keys_are_ignored(self, monkeypatch):
+        body = _clock_body(phase="core", market={"acronym": "NYSE"})
+        _install(monkeypatch, _clock_handler(body))
+
+        clock = alpaca_client.fetch_clock()
+
+        assert clock.is_open is True
+        assert clock.next_close == "2026-08-19T20:00:00Z"

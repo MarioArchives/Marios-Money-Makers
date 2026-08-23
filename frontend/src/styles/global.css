@@ -39,6 +39,7 @@
   --color-bar-text-muted: rgb(22 50 79 / 70%);
   --color-chart-line: var(--navy);
   --color-chart-grid: #eee4c2;
+  --color-chart-closed: var(--color-surface-sunken);
 
   /* --- Type ------------------------------------------------------------- */
   /* Display: Gill Sans — the British humanist sans (Penguin, LNER, the BBC).

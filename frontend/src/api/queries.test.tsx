@@ -8,17 +8,25 @@ import {
   STALE_TIME_MS,
   alignedPollInterval,
   historyKey,
+  marketClockKey,
   msUntilNextPoll,
   stockKey,
   stocksKey,
   storedKey,
+  useMarketClockQuery,
   useStockDetailQuery,
   useStockHistoryQuery,
   useStocksQuery,
   useStoredDataQuery,
 } from './queries'
 import { apiGet } from './client'
-import type { HistoryResponse, StockSummary, StocksResponse, StoredDataResponse } from './types'
+import type {
+  HistoryResponse,
+  MarketClockResponse,
+  StockSummary,
+  StocksResponse,
+  StoredDataResponse,
+} from './types'
 
 vi.mock('./client', () => ({
   apiGet: vi.fn(),
@@ -358,5 +366,56 @@ describe('useStockDetailQuery / useStockHistoryQuery ticker isolation', () => {
     // GSK.L was never rendered/fetched — its cache entry must not exist yet.
     expect(client.getQueryData(stockKey('GSK.L'))).toBeUndefined()
     expect(client.getQueryCache().find({ queryKey: stockKey('GSK.L') })).toBeUndefined()
+  })
+})
+
+describe('useMarketClockQuery', () => {
+  const clock: MarketClockResponse = {
+    timestamp: '2026-08-19T13:12:57Z',
+    is_open: false,
+    next_open: '2026-08-19T13:30:00Z',
+    next_close: '2026-08-19T20:00:00Z',
+    fetched_at: '2026-08-19T13:12:57Z',
+    is_stale: false,
+    error: null,
+  }
+
+  beforeEach(() => {
+    mockedApiGet.mockReset()
+  })
+
+  it('keys the market clock under [market, clock], apart from every stock key', () => {
+    expect(marketClockKey).toEqual(['market', 'clock'])
+    expect(marketClockKey[0]).not.toBe(stocksKey[0])
+    expect(marketClockKey[0]).not.toBe(stockKey('AAPL')[0])
+  })
+
+  it('fetches GET /api/market/clock and caches the payload under the clock key', async () => {
+    mockedApiGet.mockResolvedValue(clock)
+    const client = makeQueryClient()
+
+    const { result } = renderHook(() => useMarketClockQuery(), {
+      wrapper: createWrapper(client),
+    })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(mockedApiGet).toHaveBeenCalledTimes(1)
+    expect(mockedApiGet).toHaveBeenCalledWith('/api/market/clock')
+    expect(result.current.data).toEqual(clock)
+    expect(client.getQueryData(marketClockKey)).toEqual(clock)
+  })
+
+  it('polls on the shared aligned tick with the common staleTime', async () => {
+    mockedApiGet.mockResolvedValue(clock)
+    const client = makeQueryClient()
+
+    const { result } = renderHook(() => useMarketClockQuery(), {
+      wrapper: createWrapper(client),
+    })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const query = client.getQueryCache().find({ queryKey: marketClockKey })
+    expect(refetchIntervalOf(query)).toBe(alignedPollInterval)
+    expect((query?.options as { staleTime?: unknown } | undefined)?.staleTime).toBe(STALE_TIME_MS)
   })
 })

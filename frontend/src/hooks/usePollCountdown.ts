@@ -60,10 +60,33 @@ export function usePollCountdown(intervalMs: number = POLL_INTERVAL_MS): PollCou
       })
     }
 
+    // Cache events can fire synchronously *inside another component's
+    // render*: React Query builds a new query observer during `useQuery`'s
+    // render path and emits `added` (first visit to a range/tier, a new
+    // ticker). Calling setState from that callback would be a
+    // cross-component update during render (React warns and it is a
+    // wasted render). Defer to a microtask -- still before paint, and
+    // coalesces a burst of events into one evaluation.
+    let disposed = false
+    let scheduled = false
+    const onCacheEvent = (): void => {
+      if (scheduled) {
+        return
+      }
+      scheduled = true
+      queueMicrotask(() => {
+        scheduled = false
+        if (!disposed) {
+          evaluate()
+        }
+      })
+    }
+
     evaluate()
-    const unsubscribe = cache.subscribe(evaluate)
+    const unsubscribe = cache.subscribe(onCacheEvent)
     const timer = window.setInterval(evaluate, COUNTDOWN_TICK_MS)
     return () => {
+      disposed = true
       unsubscribe()
       window.clearInterval(timer)
     }

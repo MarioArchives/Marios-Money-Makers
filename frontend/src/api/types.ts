@@ -87,3 +87,18 @@ export interface FxRate {
   /** Human label of where the rate came from. */
   source: string
 }
+
+/**
+ * `GET /api/market/clock`: Alpaca's market clock as cached by the backend
+ * (all timestamps `YYYY-MM-DDTHH:MM:SSZ`). `is_stale`/`error` follow the
+ * same convention as every other response.
+ */
+export interface MarketClockResponse {
+  timestamp: string
+  is_open: boolean
+  next_open: string
+  next_close: string
+  fetched_at: string
+  is_stale: boolean
+  error: string | null
+}

@@ -89,6 +89,54 @@ SQLite file is created at `backend/data/stocks.db` (git-ignored).
 
 ---
 
+## Mock data server (offline development)
+
+`mock/alpaca_mock.py` is a stdlib-only stand-in for the Alpaca data *and*
+trading APIs. It implements the three endpoints the backend calls —
+`/v2/stocks/snapshots`, `/v2/stocks/{symbol}/bars` (paginated) and the
+market clock `/v2/clock` — and serves a deterministic sinusoidal price for
+every symbol:
+
+```
+price(t) = 100 + 20 · sin(2π · t / 20 min + phase(symbol))
+```
+
+i.e. every stock oscillates between 80 and 120 on a 20-minute cycle. Each
+of the 20 symbols gets a different phase so the leaderboard keeps
+re-ranking (`--no-phase-shift` makes them identical); `--offset`,
+`--amplitude`, `--period-minutes` tune the curve. Minute/hour bars are
+generated 24/7 (pass `--sessions-only` to emit them only inside the
+13:30Z–20:00Z session, every day, so the 1D chart shows its greyed
+market-closed block); daily bars are one per weekday stamped 04:00Z like
+Alpaca's. The mock clock reports the market open 13:30Z–20:00Z every day
+(weekends included, in both modes) so the banner shows both states. No
+keys, no network.
+
+The backend needs no code change — it reads `ALPACA_DATA_BASE_URL` and
+`ALPACA_TRADING_BASE_URL` (point both at the mock). Always pair it with a
+**separate** `STOCKS_DB_PATH` so mock bars are never upserted into your real
+`stocks.db`:
+
+```bash
+# local, one command (mock on :8500 + backend on :8000, separate mock.db)
+./mock/dev.sh                      # then `cd frontend && npm run dev` as usual
+
+# or by hand
+python3 mock/alpaca_mock.py --port 8500 &
+cd backend && ALPACA_DATA_BASE_URL=http://localhost:8500 \
+  ALPACA_TRADING_BASE_URL=http://localhost:8500 \
+  STOCKS_DB_PATH=$PWD/data/mock.db uv run uvicorn app.main:app --port 8000
+
+# Docker Compose overlay
+docker compose -f docker-compose.yml -f docker-compose.mock.yml up --build
+```
+
+`curl localhost:8500/healthz` shows the active curve parameters. Because the
+period divides a day exactly, daily open/close are the same every day, so
+the **ALL** view is flat by design; **1D** shows the sine.
+
+---
+
 ## Tests
 
 ```bash
@@ -101,58 +149,205 @@ No test touches the network or your real credentials.
 
 ---
 
+## Data flow
+
+```
+ Browser (React + TanStack Query)         Backend (FastAPI, app/routers/stocks.py)          External
+ ────────────────────────────────         ────────────────────────────────────────          ────────
+ poll /api/stocks            every 20 s ─►  SQLite fresh? ──yes──► serve table ──────────────► JSON
+ poll /api/stocks/{t}/history  "    "          │ no
+ poll /api/stocks/{t}/stored   "    "          ▼
+ poll /api/market/clock        "    "     (same rule; the `meta` table is its cache)
+                                          in-process lock → cross-process lease
+                                               │ (someone else fetching? serve table as-is)
+                                               ▼
+                                          fetch ──────────────────────────────────────────► data.alpaca.markets
+                                               │  (market clock: GET /v2/clock ──────────────► paper-api.alpaca.markets)
+                                          write SQLite (rows + fetch_log stamp) → serve
+                                               ▲
+ backfill sweep (startup, then every 10 min) ──┘  same refresh paths, no browser required
+
+ hourly USD→GBP rate ───────────────────────────────────────────────────────────────────────► api.frankfurter.dev
+```
+
+The rule everywhere is **SQLite first, Alpaca only when stale, never block a
+request on someone else's fetch**. There is no in-memory cache in the
+backend; the DB tables *are* the cache (see [What the store holds](#what-the-store-holds)).
+
+### 1. Leaderboard request — `GET /api/stocks` (and `/api/stocks/{ticker}`)
+
+`_get_summaries_batch` in `app/routers/stocks.py`:
+
+1. **Fresh?** Read the `fetch_log` stamp `(summaries, *)`. Younger than
+   `CACHE_TTL_SECONDS` (20 s, same as the poll) → return the `summaries`
+   table, `is_stale=false`, **zero Alpaca calls**. (`change` /
+   `change_percent` are derived on read, never stored.)
+2. **Backing off?** After a *total* failure (every row errored) an
+   in-process exponential backoff (`90 s × 2ⁿ⁻¹`, capped at 600 s) blocks
+   refetches → serve the table flagged `is_stale=true`.
+3. **In-process single flight.** Take the `summaries` `asyncio.Lock` and
+   re-run 1–2. A burst of concurrent polls in one process collapses into
+   one fetch: when the leader succeeds the waiters find the stamp fresh
+   and serve the new table; when the leader fails they find backoff active
+   and serve stale — they do **not** retry.
+4. **Cross-process single flight.** `storage.try_claim` upserts a lease row
+   in `fetch_claims` (`FETCH_LEASE_SECONDS`, 10 s). Another backend
+   process holding a live claim means this request **does not wait**: it
+   serves the table as-is (stale) and the next poll picks up the refreshed
+   rows. A claim older than the lease (holder hung/crashed — bounded,
+   because the Alpaca timeout of 5 s is ≤ the lease) is taken over. The
+   claim carries a `claim_id` fencing token, so a worker that overran its
+   lease cannot delete the new holder's claim when it finally releases.
+5. **Fetch.** One `GET /v2/stocks/snapshots` for all 20 symbols, in a
+   worker thread (sync `httpx`). `fetch_summaries` never raises: request
+   failures come back as an all-error batch, 429 flagged distinctly.
+   - **Success** → `upsert_summaries` writes all 20 rows + the stamp in one
+     `BEGIN IMMEDIATE` transaction, monotonic on `fetched_at` (a late or
+     duplicate writer can never overwrite newer data); each ticker's latest
+     minute bar is persisted best-effort into `bars_minute`; backoff is
+     reset; **then** the fresh batch is returned. Write first, serve second.
+   - **Per-ticker failure** (symbol missing from the response, no
+     `prevDailyBar`) → that row is flagged, the rest of the batch is fine;
+     never a 5xx.
+   - **Total failure** → nothing written, one backoff failure recorded (by
+     the leader only), table served stale. Cold start with an empty table
+     serves the error-flagged batch so the UI still renders (greyed rows).
+   - The lease is released in `finally` with the fencing token.
+
+### 2. History request — `GET /api/stocks/{ticker}/history?range=…`
+
+Same shape, per `(ticker, tier)` with `1d → bars_minute`, `30d → bars_hour`,
+`all → bars_month` (daily bars, never pruned):
+
+1. `refresh_history` takes the per-pair lock, re-checks the pair's
+   `fetch_log` stamp against the tier's freshness window (20 s / 1 h / 24 h),
+   takes the per-pair `fetch_claims` lease, then `fetch_bars` in a worker
+   thread (`GET /v2/stocks/{symbol}/bars`, paginated via `next_page_token`,
+   `adjustment=split`).
+2. On success: upsert bars (`PRIMARY KEY (ticker, ts)`, so overlapping
+   windows never duplicate), `record_fetch`, prune retention (minute 24 h,
+   hour 30 d). An empty bar list (weekend) is a successful fetch and is
+   stamped too.
+3. The endpoint then **reads back from SQLite** and returns — the read is
+   the retention window for minute/hour, unbounded for the daily tier
+   (that is what makes `all` grow by one bar per trading day).
+4. On `AlpacaError`: serve whatever is stored with `is_stale=true`; **503
+   only when the DB holds nothing** for that pair. No backoff here — the
+   next caller simply retries.
+
+### 2b. Market clock — `GET /api/market/clock` (`app/routers/market.py`)
+
+The US market open/closed state is not computed anywhere in the app any
+more: it is Alpaca's legacy market clock, `GET /v2/clock` on the **trading**
+host (`ALPACA_TRADING_BASE_URL`, paper by default) → `{timestamp, is_open,
+next_open, next_close}`. The backend stores the last fetched clock in the
+`meta` table under `market_clock` (JSON, with its `fetched_at`) and serves
+it from there until one of the boundaries it carries arrives: while `now` is
+before **both** `next_open` and `next_close` the stored clock still describes
+the present, however long ago it was fetched (a clock read on Friday
+afternoon is still the right answer on Sunday night). The moment a boundary
+passes it is wrong data and is refetched, so a cached "open" is never served
+after the close. There is no TTL on top of that: it would refetch clocks that
+are still correct — a browser polling every 20 s would mean ~1000 Alpaca calls
+a day — to narrow the window on the only thing a boundary check cannot see, a
+session the exchange re-schedules *after* we cached it. That is picked up at
+the next boundary instead. Otherwise one worker refetches (in-process lock + the same
+`fetch_claims` lease as everything else, pseudo-pair `clock`/`*`) and
+rewrites the key. Alpaca failure → the stored clock with `is_stale: true`
+and the error; **503** only when nothing has ever been stored. No backoff:
+the next request simply tries again. The backfill sweep refreshes the clock
+at the start of every pass too, so `meta.market_clock` is current even with
+no browser open. Timestamps are normalised to UTC `…Z` (Alpaca serves New
+York offsets).
+
+### 3. Backfill sweep — `app/backfill.py`
+
+Opening a chart is not the only thing that refreshes the bar tables: on
+startup, and then every `BACKFILL_INTERVAL_SECONDS` (default 10 min), the
+sweep first runs the leaderboard refresh (so a restarted backend has a
+populated board before any browser polls) and the market-clock refresh
+(§2b), then walks every (tier, ticker)
+pair tier-major (minute → hour → daily) and refreshes any whose `fetch_log`
+entry has lapsed, through the very same `refresh_history` path (lock +
+lease + fetch + upsert + stamp + prune) the endpoint uses — so a request and
+the sweep can never double-fetch a pair or disagree about "fresh". Fresh
+pairs cost zero Alpaca calls, so steady state is ~20 minute-bar calls per
+interval, ~20 hourly per hour and ~20 daily per day (worst case after a
+long outage: all 60 in one pass). A rate-limited fetch pauses
+`BACKFILL_RATE_LIMIT_PAUSE_SECONDS` and retries that pair once; any other
+failure is logged (`app.backfill`) and skipped. Set `BACKFILL_ENABLED=0` to
+turn it off.
+
+### 4. In the browser
+
+- `api/queries.ts` — every stock query polls every 20 s
+  (`refetchInterval: 20000`, `staleTime: 18000`) under keys `['stocks']`,
+  `['stock', ticker]`, `['stock', ticker, 'history', range]`,
+  `['stock', ticker, 'stored', tier]`, plus `['market', 'clock']` for the
+  market clock (`/api/market/clock`); the header's `PollCountdownBar` reads
+  the stock entries to draw the countdown. `QueryClient` defaults:
+  `retry: 3`, `refetchOnWindowFocus: false`.
+- `api/client.ts` — `VITE_API_BASE_URL` ?? (`''` in prod = same origin via
+  Caddy, `http://localhost:8000` in dev).
+- `api/fx.ts` / `FxRateProvider` — the **only other external call**: the
+  browser fetches the ECB USD→GBP reference rate from Frankfurter once an
+  hour and converts every price client-side (`utils/currency.ts`). The
+  backend never sees GBP. If the rate is unavailable the native USD figures
+  are shown; nothing goes blank.
+- Stale/errored rows stay on screen greyed out; only an unreachable backend
+  shows the single `ConnectionBanner`.
+
+### What the store holds
+
+| Table | Rows | Role |
+| --- | --- | --- |
+| `bars_minute` / `bars_hour` / `bars_month` | `(ticker, ts)` PK, `price`, `analytics` JSON (`o/h/l/c/v/vw/n`), `recorded_at` | History tiers behind `1d` / `30d` / `all`. Retention 24 h / 30 d / **never pruned** (the "month" tier holds *daily* bars and backs the all-time view). `recorded_at` is when the row's price was last recorded (unchanged on a same-price refetch). |
+| `summaries` | exactly one current-state row per ticker (20, ever) | The leaderboard cache: `price`, `previous_close`, `currency`, `error`, `fetched_at`. |
+| `fetch_log` | one row per `(tier, ticker)` + the pseudo-pair `(summaries, *)` | When each pair was last *successfully fetched from Alpaca* — the freshness source of truth (not `recorded_at`, which the leaderboard's minute-bar upserts would keep perpetually fresh). |
+| `fetch_claims` | transient lease rows with a `claim_id` fencing token | Cross-process single flight. |
+| `meta` | key/value | `bars_adjustment` remembers `ALPACA_BARS_ADJUSTMENT` so a change invalidates the bar stamps once; `market_clock` holds the last Alpaca clock (`timestamp`, `is_open`, `next_open`, `next_close`, `fetched_at`) — the cache behind `/api/market/clock`. |
+
+WAL journal mode; timestamps stored as `YYYY-MM-DDTHH:MM:SSZ` text so string
+order equals chronological order. Location: `STOCKS_DB_PATH`
+(`backend/data/stocks.db` locally, the `stocks-data` volume in Docker).
+
+---
+
 ## API
 
-All endpoints are `GET`, JSON, CORS-restricted to `ALLOWED_ORIGINS`.
+All endpoints are `GET`, JSON, CORS-restricted to `ALLOWED_ORIGINS` (GET
+only). Interactive docs at `/docs` (Swagger UI), `/redoc`, schema at
+`/openapi.json`.
 
-| Endpoint | Returns | Failure behaviour |
+| Endpoint | Returns | Behaviour / failure modes |
 | --- | --- | --- |
-| `/api/stocks` | `StocksResponse` — all 20 tickers (`price`, `previous_close`, `change`, `change_percent`, `currency`, `is_stale`, `error`) | Always 200. DB-first: served straight from the SQLite `summaries` table (one current-state row per ticker, 20 rows, restart-safe; `change` derived on read) while its `fetch_log` stamp is within `CACHE_TTL_SECONDS`; otherwise exactly one worker refetches (in-process lock + cross-process `fetch_claims` lease) and rewrites all 20 rows atomically. Per-ticker failures are flagged, never fatal. On a *total* failure nothing is written and the table is served marked `is_stale` (cold start with an empty table: the error-flagged batch). |
-| `/api/stocks/{ticker}` | one `StockSummary` from the same table/batch | 404 for tickers outside the fixed 20 |
-| `/api/stocks/{ticker}/history?range=1d\|30d\|all` | `HistoryResponse` — `points: [{t, close}]` at minute / hourly / daily resolution. `all` is the **all-time** view: every daily bar ever stored for the ticker (the daily tier is never pruned, so it grows by one bar per trading day; the first fetch backfills `MONTH_BACKFILL_DAYS`). | SQLite is the cache: served straight from the DB while the last successful Alpaca fetch for that ticker+tier (tracked in the `fetch_log` table, restart-safe) is within the tier's freshness window; on Alpaca failure returns stored rows with `is_stale: true`; 503 only when the DB has nothing for that ticker+tier. 422 for an unknown `range`. |
-| `/api/stocks/{ticker}/stored?tier=minute\|hour\|month` | `StoredDataResponse` — raw inspection of the SQLite store: every row of `bars_<tier>` for the ticker (`ts`, `price`, parsed `analytics` = Alpaca `o/h/l/c/v/vw/n`, `recorded_at`), oldest first, plus `counts` per tier and the tier's `last_fetch_at`. | Read-only, never calls Alpaca. 404 unknown ticker, 422 unknown tier; an empty tier is `200` with `rows: []`. |
+| `/api/health` | `{"status": "ok"}` | Liveness probe, no I/O; used by the prod Docker healthcheck (every 30 s). |
+| `/api/stocks` | `StocksResponse` — `updated_at` + all 20 `StockSummary` rows (`ticker`, `name`, `sector`, `price`, `previous_close`, `change`, `change_percent`, `currency`, `is_stale`, `error`) | **Always 200.** Served from the `summaries` table while its `fetch_log` stamp is within `CACHE_TTL_SECONDS`; otherwise exactly one worker refetches (in-process lock + cross-process lease) and rewrites all 20 rows atomically. Per-ticker failures are flagged, never fatal. Total failure → nothing written, table served `is_stale`, backoff engaged (cold start with an empty table: the error-flagged batch). See [Data flow §1](#1-leaderboard-request--get-apistocks-and-apistocksticker). |
+| `/api/stocks/{ticker}` | one `StockSummary` from the same table/batch | Same flow as above. **404** for tickers outside the fixed 20. |
+| `/api/stocks/{ticker}/history?range=1d\|30d\|all` | `HistoryResponse` — `ticker`, `interval` (`1m`/`1h`/`1d`), `range`, `points: [{t, close}]`, `is_stale`, `error` | SQLite is the cache: served from the DB while the pair's last successful Alpaca fetch is within the tier's freshness window; otherwise one worker refreshes and the DB is read back. On Alpaca failure returns stored rows with `is_stale: true`; **503** only when the DB has nothing for that ticker+tier. **404** unknown ticker, **422** unknown `range`. `all` is the all-time view (every daily bar ever stored; first fetch backfills `MONTH_BACKFILL_DAYS`). See [Data flow §2](#2-history-request--get-apistockstickerhistoryrange). |
+| `/api/market/clock` | `MarketClockResponse` — `timestamp`, `is_open`, `next_open`, `next_close` (UTC `…Z`), `fetched_at`, `is_stale`, `error` | Alpaca's `GET /v2/clock`, cached in `meta.market_clock`: served from the DB until one of the boundaries it carries (`next_open`/`next_close`) is reached — no TTL, an old `fetched_at` alone is not a reason to refetch; on a passed boundary one worker refetches (lock + lease). Alpaca failure → stored clock `is_stale: true`; **503** only when nothing was ever stored. See [Data flow §2b](#2b-market-clock--get-apimarketclock-approutersmarketpy). |
+| `/api/stocks/{ticker}/stored?tier=minute\|hour\|month` | `StoredDataResponse` — `table`, `currency`, `last_fetch_at`, `counts` per tier, `rows` (every `bars_<tier>` row: `ts`, `price`, parsed `analytics`, `recorded_at`), oldest first | Read-only inspection of the SQLite store: **never calls Alpaca, never writes.** **404** unknown ticker, **422** unknown tier; an empty tier is `200` with `rows: []`. |
 
-`fetch_summaries` makes **one** `GET /v2/stocks/snapshots` request for the
-whole universe; history uses `GET /v2/stocks/{symbol}/bars` with pagination.
-Every request is capped at `ALPACA_TIMEOUT_SECONDS`. Timestamps are
-normalised to `YYYY-MM-DDTHH:MM:SSZ` so string order == chronological order
-in SQLite.
+Status codes at a glance: `200` (including stale data), `404` unknown
+ticker, `422` bad `range`/`tier`, `503` history (or the market clock) with
+Alpaca down *and* nothing stored for it. Nothing here returns `500` for
+Alpaca reasons.
 
-**Leaderboard data flow.** There is no in-memory cache. A poll reads the
-`fetch_log` stamp `(summaries, *)`; inside `CACHE_TTL_SECONDS` the
-`summaries` table is returned with zero Alpaca calls. Otherwise the request
-takes the in-process `summaries` lock, re-checks (a burst of concurrent
-polls collapses into one fetch; if the leader just failed, the waiters serve
-stale instead of retrying), then claims the `(summaries, *)` row of the
-`fetch_claims` table -- a lease of `FETCH_LEASE_SECONDS` that makes several
-backend processes sharing one DB file fetch at most once per window too (a
-process that finds the lease held just serves the table). The claim carries a
-`claim_id` fencing token, so a worker that overran its lease and was taken
-over cannot delete the new holder's claim when it releases. The fetched batch
-is written as 20 rows + the stamp in one transaction, monotonic on
-`fetched_at`, so a late/duplicate writer can never overwrite newer data. The
-backfill sweep runs the same refresh first on every pass, so a restarted
-backend has a populated board before any browser polls.
-
-**Backfill sweep.** Opening a chart is not the only thing that refreshes
-the bar tables: on startup, and then every `BACKFILL_INTERVAL_SECONDS`
-(default 10 min), `app/backfill.py` walks every (tier, ticker) pair
-tier-major (minute → hour → daily) and refreshes any whose `fetch_log`
-entry has lapsed past the tier's freshness window, through the same
-per-pair lock + fetch + upsert + `fetch_log` + prune path the history
-endpoint uses (`refresh_history`). Fresh pairs cost zero Alpaca calls, so
-steady state is ~20 minute-bar calls per interval, ~20 hourly per hour and
-~20 daily per day (worst case after a long outage: all 60 in one pass). A
-rate-limited fetch pauses `BACKFILL_RATE_LIMIT_PAUSE_SECONDS` and retries
-that pair once; any other failure is logged (`app.backfill`) and skipped.
-Set `BACKFILL_ENABLED=0` to turn it off.
+Alpaca calls behind the API: `fetch_summaries` makes **one**
+`GET /v2/stocks/snapshots` request for the whole universe; history uses
+`GET /v2/stocks/{symbol}/bars` with pagination; the market clock is
+`fetch_clock` → `GET /v2/clock` on the *trading* host
+(`ALPACA_TRADING_BASE_URL`, not the data host). Every request is capped at
+`ALPACA_TIMEOUT_SECONDS` and carries the `KEY_ID`/`SECRET` headers (the data
+requests also `feed=iex`).
 
 ### Configuration (environment variables)
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `KEY_ID` / `SECRET` | — | Alpaca credentials (see [Secrets](#secrets)) |
-| `ALPACA_DATA_BASE_URL` | `https://data.alpaca.markets` | data API host |
+| `ALPACA_DATA_BASE_URL` | `https://data.alpaca.markets` | data API host (snapshots, bars) |
+| `ALPACA_TRADING_BASE_URL` | `https://paper-api.alpaca.markets` | trading API host, used only for the market clock (`/v2/clock`); paper by default because the setup above creates paper keys — set `https://api.alpaca.markets` for live keys |
 | `ALPACA_FEED` | `iex` | free-plan feed |
 | `ALPACA_BARS_ADJUSTMENT` | `split` | `adjustment` sent on every bars request (`raw`\|`split`\|`dividend`\|`all`); `split` keeps history split-adjusted instead of Alpaca's as-traded `raw` default. Changing it invalidates the stored bar fetch stamps once so existing rows are refetched (snapshots unaffected) |
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | comma-separated CORS origins |
@@ -171,6 +366,20 @@ Retention: minute bars 24 h, hourly bars 30 d, daily bars kept forever.
 See `backend/app/config.py` for the full list.
 
 ## Frontend behaviour
+
+### Pages & routes
+
+`router.tsx` — every route renders inside the `AppShell` layout (header
+with the M³ mark, nav links and the `PollCountdownBar`; `<Outlet/>` below).
+Pages are thin composition only; data lives in hooks and child components.
+
+| Route | Page | Data | What it shows |
+| --- | --- | --- | --- |
+| `/` | `pages/LeaderboardPage` | `useStocksQuery()` → `/api/stocks`; `MarketStatusBanner` → `useMarketClockQuery()` → `/api/market/clock` | `MarketStatusBanner` (open/closed from the backend market clock + a local countdown to `next_open`/`next_close`; hidden until the clock has loaded), `ConnectionBanner` if the API is unreachable, the `FxRateNote` rate disclosure, and `StockTable` — 20 `StockRow`s ranked by `change_percent` (`utils/sortStocks.ts`) with FLIP re-rank animation, rank-delta chips, GBP prices via `ChangeIndicator`/`CompanyIcon`. |
+| `/stock/:ticker` | `pages/StockDetailPage` | `useStockDetailQuery(ticker)` → `/api/stocks/{ticker}`; `useStockHistoryQuery(ticker, range)` → `/history?range=`; `useStoredDataQuery(ticker, tier)` → `/stored?tier=` | `StockHeader` + `PriceTicker`, `RangeSelector` (1D / 30D / ALL, kept in `?range=` by `hooks/useHistoryRange`), `StockChart` (Recharts), and the `RawDataTable` "Stored data" card showing the SQLite rows for the Minute / Hourly / Daily tier, plus the `FxRateNote` rate disclosure. A query error (backend down, or the API's 404 for an unknown ticker) shows the `ConnectionBanner`. |
+| `/dashboard` | `pages/DashboardPage` | none (static) | Placeholder cards only: `MarketSummaryCard`, `SectorBreakdownCard`, `TopMoversCard`. |
+
+### Behaviour
 
 - **Leaderboard** (`/`) polls `/api/stocks` every 20 s and ranks the board by
   today's change (`change_percent`, highest first; rows without a figure sink
@@ -235,9 +444,10 @@ See `backend/app/config.py` for the full list.
 │   │   ├── tickers.py          # the fixed 20 (ticker, name, sector)
 │   │   ├── schemas.py          # pydantic response models
 │   │   ├── alpaca_client.py    # all Alpaca HTTP calls (httpx)
-│   │   ├── storage.py          # SQLite bars_* tiers + summaries + fetch_log + fetch_claims
-│   │   └── routers/stocks.py   # the endpoints + DB-first refresh / lease / backoff logic
-│   └── tests/                  # pytest (alpaca_client, storage, router, leaderboard table, backfill)
+│   │   ├── storage.py          # SQLite bars_* tiers + summaries + fetch_log + fetch_claims + meta
+│   │   ├── routers/stocks.py   # the stock endpoints + DB-first refresh / lease / backoff logic
+│   │   └── routers/market.py   # /api/market/clock: Alpaca /v2/clock cached in meta
+│   └── tests/                  # pytest (alpaca_client, storage, routers, leaderboard table, backfill)
 └── frontend/
     ├── Dockerfile · package.json · vite.config.ts
     ├── tsconfig.json           # solution file -> tsconfig.app.json (src) + tsconfig.node.json (vite.config)
@@ -247,7 +457,7 @@ See `backend/app/config.py` for the full list.
         ├── main.tsx · router.tsx
         ├── api/                # client.ts, types.ts, queries.ts (TanStack hooks), fx.ts (USD->GBP rate)
         ├── hooks/              # useHistoryRange (?range= <-> HistoryRange), usePollCountdown
-        ├── utils/              # currency.ts (GBP conversion), sortStocks.ts, flip.ts
+        ├── utils/              # currency.ts (GBP conversion), sortStocks.ts, flip.ts, marketHours.ts (clock/countdown formatting), intradaySeries.ts (1D market-closed blocks)
         ├── providers/{AppProviders,FxRateProvider}/
         ├── pages/{LeaderboardPage,StockDetailPage,DashboardPage}/
         └── components/

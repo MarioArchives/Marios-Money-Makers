@@ -8,8 +8,20 @@ import { RawDataTable } from '../../components/stock-detail/RawDataTable/RawData
 import { ConnectionBanner } from '../../components/shared/ConnectionBanner/ConnectionBanner'
 import { FxRateNote } from '../../components/shared/FxRateNote/FxRateNote'
 import { useStockDetailQuery } from '../../api/queries'
+import type { StockSummary } from '../../api/types'
 import { useHistoryRange } from '../../hooks/useHistoryRange'
 import './StockDetailPage.css'
+
+/**
+ * The page only needs the static identity of the stock. Selecting it
+ * (module-level so the selector is stable) means the page — and with it
+ * every child it composes — is NOT re-rendered by the 20 s price tick;
+ * `PriceTicker` owns the live figure through its own query observer.
+ */
+const selectIdentity = (summary: StockSummary): { name: string; sector: string } => ({
+  name: summary.name,
+  sector: summary.sector,
+})
 
 /**
  * Per-stock detail page. Reads `ticker` from the route params and the
@@ -20,9 +32,11 @@ import './StockDetailPage.css'
  * Holds no live data state of its own: `PriceTicker`, `StockChart` and
  * `RawDataTable` each own their own polling query independently (per the
  * plan, so a price tick never touches chart render inputs and vice versa).
- * The one query this page reads (`useStockDetailQuery`) sources the static
- * `name`/`sector` for `StockHeader` — it shares its cache entry with
- * `PriceTicker`'s own identical query, so it adds no extra network traffic.
+ * The one query this page reads (`useStockDetailQuery`, narrowed with
+ * `selectIdentity`) sources the static `name`/`sector` for `StockHeader` —
+ * it shares its cache entry with `PriceTicker`'s own query, so it adds no
+ * extra network traffic, and because only the selected identity is
+ * subscribed to, a price tick never re-renders the page tree.
  *
  * Failure behaviour (v3): that shared query's error state is also this
  * page's signal that the backend is unreachable. Nothing is unmounted —
@@ -33,7 +47,7 @@ export function StockDetailPage(_props: StockDetailPageProps): JSX.Element {
   void _props
   const { ticker } = useParams<{ ticker: string }>()
   const tickerValue = ticker ?? ''
-  const { data, isError } = useStockDetailQuery(tickerValue)
+  const { data, isError } = useStockDetailQuery(tickerValue, selectIdentity)
   const [range, setRange] = useHistoryRange()
 
   return (
