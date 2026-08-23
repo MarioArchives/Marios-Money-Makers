@@ -538,3 +538,94 @@ describe('makeTimeFormatter', () => {
     expect(makeTimeFormatter('1d')(gap!.t)).toBe('')
   })
 })
+
+describe('StockChart empty state', () => {
+  function buildResult(
+    overrides: Partial<{
+      points: HistoryPoint[] | undefined
+      isLoading: boolean
+      isError: boolean
+      range: HistoryRange
+    }> = {},
+  ): UseQueryResult<HistoryResponse, Error> {
+    const { points, isLoading = false, isError = false, range = '1d' } = overrides
+    return {
+      data:
+        points === undefined
+          ? undefined
+          : {
+              ticker: 'AZN.L',
+              interval: range === '1d' ? '1m' : '1d',
+              range,
+              points,
+              is_stale: false,
+              error: null,
+            },
+      isSuccess: points !== undefined,
+      isLoading,
+      isError,
+      error: isError ? new Error('boom') : null,
+    } as unknown as UseQueryResult<HistoryResponse, Error>
+  }
+
+  it('explains an empty 1d window as the market being closed', () => {
+    // The 1d window is the last 24h; out of hours (and all weekend, once
+    // the 24h minute retention has pruned the last session) it is legitimately
+    // empty -- and with no bars there is no gap to grey out either.
+    mockedUseStockHistoryQuery.mockReturnValue(buildResult({ points: [] }))
+
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(screen.getByTestId('stock-chart-empty')).toHaveTextContent(
+      'Market closed · no trades in the last 24 hours',
+    )
+    expect(screen.queryByTestId('line-chart')).not.toBeInTheDocument()
+  })
+
+  it('renders the chart, not the empty copy, as soon as the series has a point', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(
+      buildResult({ points: [{ t: '2026-08-19T12:00:00Z', close: 100 }] }),
+    )
+
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(screen.queryByTestId('stock-chart-empty')).not.toBeInTheDocument()
+    expect(screen.getByTestId('line-chart')).toBeInTheDocument()
+  })
+
+  it('uses range-specific copy: an empty 30d or all-time series is not "market closed"', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildResult({ points: [], range: '30d' }))
+    const { rerender } = render(<StockChart ticker="AZN.L" range="30d" />)
+    expect(screen.getByTestId('stock-chart-empty')).toHaveTextContent(
+      'No price history stored for the last 30 days yet',
+    )
+
+    mockedUseStockHistoryQuery.mockReturnValue(buildResult({ points: [], range: 'all' }))
+    rerender(<StockChart ticker="AZN.L" range="all" />)
+    expect(screen.getByTestId('stock-chart-empty')).toHaveTextContent(
+      'No price history stored yet',
+    )
+  })
+
+  it('stays quiet while the first fetch is still in flight', () => {
+    // "No data yet" and "no data at all" are different things: only claim
+    // the market is closed once the API has actually answered.
+    mockedUseStockHistoryQuery.mockReturnValue(buildResult({ points: undefined, isLoading: true }))
+
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(screen.queryByTestId('stock-chart-empty')).not.toBeInTheDocument()
+  })
+
+  it('says the history is unavailable when the query failed with nothing cached', () => {
+    mockedUseStockHistoryQuery.mockReturnValue(buildResult({ points: undefined, isError: true }))
+
+    render(<StockChart ticker="AZN.L" range="1d" />)
+
+    expect(screen.getByTestId('stock-chart-empty')).toHaveTextContent(
+      'Price history unavailable',
+    )
+    // A failure is a degraded card, not a closed market.
+    expect(screen.getByTestId('stock-chart')).toHaveClass('is-stale')
+  })
+})

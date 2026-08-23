@@ -30,6 +30,23 @@
   color: var(--color-chart-line);
 }
 
+/* Stands in for the plot when the series is empty (out of hours the 1d
+   window holds no bars at all). Fills the same box the chart would have,
+   so the card keeps its height instead of collapsing. */
+.stock-chart__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0;
+  padding: 0 var(--space-4);
+  text-align: center;
+  text-wrap: balance;
+  color: var(--color-text-muted);
+  background: var(--color-chart-closed);
+  border-radius: var(--radius-sm);
+}
+
 .stock-chart.is-stale {
   opacity: var(--stale-opacity);
 }

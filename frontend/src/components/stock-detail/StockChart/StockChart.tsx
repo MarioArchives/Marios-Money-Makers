@@ -55,6 +55,28 @@ export const RANGE_TITLES: Record<HistoryRange, string> = {
 };
 
 /**
+ * Copy for a series the API answered with, that turned out to hold nothing.
+ *
+ * The 1d window is the last 24 hours, so out of hours it empties out
+ * legitimately: after the close it holds only that session, and by the
+ * weekend the 24h minute retention has pruned the last session entirely.
+ * That case needs saying out loud, because the greyed market-closed block
+ * cannot cover it -- `buildIntradaySeries` only fills holes *between* two
+ * bars, so a window with no bars (or a closed stretch at either edge) has
+ * nothing to grey. 30d/all are stored tiers rather than windows, so an
+ * empty one means "nothing fetched yet", never "market closed".
+ */
+export const EMPTY_LABELS: Record<HistoryRange, string> = {
+  "1d": "Market closed · no trades in the last 24 hours",
+  "30d": "No price history stored for the last 30 days yet",
+  all: "No price history stored yet",
+};
+
+/** Shown instead of {@link EMPTY_LABELS} when the fetch itself failed and
+ * nothing was cached: an outage is not a closed market. */
+export const EMPTY_ERROR_LABEL = "Price history unavailable";
+
+/**
  * ISO timestamp (categorical axes) or ms-since-epoch (the 1d proportional
  * time axis) -> axis label. Intraday reads as a trading clock ("14:35");
  * 30 days reads as dates ("19 Aug"); all-time reads as months ("Aug 2026")
@@ -187,6 +209,11 @@ export function StockChart({
   }, [points, rate, range]);
   const formatPrice = (value: number): string =>
     formatCurrency(value, displayCurrency);
+  // Nothing to plot. Only speak up once the API has actually answered:
+  // while the first fetch is in flight "no points yet" says nothing about
+  // the market. A later poll failing keeps whatever is already accumulated,
+  // so this stays false and the chart holds its shape.
+  const isEmpty = plotted.length === 0 && !query.isLoading;
 
   return (
     <section
@@ -201,6 +228,11 @@ export function StockChart({
         </span>
       </header>
       <div className="stock-chart__plot">
+        {isEmpty ? (
+          <p className="stock-chart__empty" data-testid="stock-chart-empty">
+            {query.isError ? EMPTY_ERROR_LABEL : EMPTY_LABELS[range]}
+          </p>
+        ) : (
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
             data={plotted}
@@ -270,6 +302,7 @@ export function StockChart({
             />
           </LineChart>
         </ResponsiveContainer>
+        )}
       </div>
     </section>
   );
