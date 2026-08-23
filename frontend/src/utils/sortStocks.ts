@@ -1,16 +1,6 @@
 import type { StockSummary } from '../api/types'
 
-/**
- * Leaderboard order: highest `change_percent` first. Stocks with no change
- * figure yet (null — e.g. DB-fallback rows during an Alpaca outage) sink
- * to the bottom; ties (and the null group) fall back to ticker order so
- * the board is deterministic and never jitters between polls for rows
- * that did not actually change.
- *
- * Pure and non-mutating: returns a new array holding the same
- * `StockSummary` object references, so `React.memo`'d rows still skip
- * re-rendering when their own data is unchanged.
- */
+/** Leaderboard order: highest `change_percent` first; null (e.g. DB-fallback rows) sinks to the bottom; ties fall back to ticker order so the board never jitters. Non-mutating, same object references, so `React.memo`'d rows skip re-rendering. */
 export function sortByChangeDesc(stocks: readonly StockSummary[]): StockSummary[] {
   return [...stocks].sort((a, b) => {
     const aNull = a.change_percent === null

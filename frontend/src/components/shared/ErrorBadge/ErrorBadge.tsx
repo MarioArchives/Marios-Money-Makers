@@ -2,14 +2,9 @@ import type { ErrorBadgeProps } from './ErrorBadge.props'
 import './ErrorBadge.css'
 
 /**
- * The marker for a stock that is showing its last known figures rather than
- * fresh ones.
- *
- * Retained at its original path/name from the pre-v3 error UX, but reduced
- * to a single muted dot: the row itself carries the message by greying out,
- * and a rate-limited feed is not something the reader can act on, so no
- * per-row error text is rendered. Backend error strings are deliberately
- * never shown here — not as text, not in the tooltip.
+ * Marker for a stock showing last known figures rather than fresh ones.
+ * A single muted dot only — backend error strings are deliberately never
+ * shown here, not as text, not in the tooltip.
  */
 const STALE_LABEL = 'Showing last known price'
 

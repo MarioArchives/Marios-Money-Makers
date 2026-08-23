@@ -8,22 +8,9 @@ import { formatDisplayPrice } from '../../../utils/currency'
 import './PriceTicker.css'
 
 /**
- * Live price/change display for the stock detail page. Polls only
- * `useStockDetailQuery` (never the history query) so a chart-only poll
- * update never re-renders this component and vice versa.
- *
- * Degradation matches the leaderboard: when the figure is stale, errored,
- * or the query itself is failing, the last known price stays on screen and
- * simply greys out, marked by one muted dot. An em dash only when there has
- * never been a price to show.
- *
- * The figure is displayed in GBP at the shared `FxRateProvider` rate
- * (native currency until a rate is available), matching the leaderboard.
- *
- * Wrapped in `React.memo`: since this component receives only `ticker` as
- * a prop (all price data comes from its own query hook), memoizing it
- * means a parent re-render with the same `ticker` never re-renders this
- * component for reasons unrelated to its own query data changing.
+ * Live GBP-converted price/change for the stock detail page. Polls only
+ * `useStockDetailQuery`, never the history query — see ARCHITECTURE.md for
+ * the re-render isolation this depends on. Degradation matches the leaderboard.
  */
 function PriceTickerComponent({ ticker }: PriceTickerProps): JSX.Element {
   const { data, isError } = useStockDetailQuery(ticker)

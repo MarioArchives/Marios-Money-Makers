@@ -8,13 +8,7 @@ export const NO_FX_RATE: FxRateState = { status: 'loading', rate: null }
 
 export const FxRateContext = createContext<FxRateState>(NO_FX_RATE)
 
-/**
- * Owns the single USD->GBP rate query (`useUsdGbpRateQuery`) and shares
- * its result through context, so every price on screen converts with the
- * same rate from one subscription — rows and tickers never fetch FX
- * themselves. Must sit inside the `QueryClientProvider` (see
- * `AppProviders`).
- */
+/** Owns the single USD->GBP rate query and shares it via context so every price converts with the same rate from one subscription. Must sit inside `QueryClientProvider`. */
 export function FxRateProvider({ children }: FxRateProviderProps): JSX.Element {
   const query = useUsdGbpRateQuery()
   const value = useMemo<FxRateState>(() => {

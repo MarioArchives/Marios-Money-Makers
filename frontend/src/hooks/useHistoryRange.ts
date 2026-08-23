@@ -4,12 +4,7 @@ import { DEFAULT_HISTORY_RANGE, isHistoryRange, type HistoryRange } from '../api
 
 export const RANGE_SEARCH_PARAM = 'range'
 
-/**
- * The stock detail page's history range, kept in the URL (`?range=30d`)
- * so it survives reloads, is shareable, and needs no page-level state.
- * Unknown or absent values resolve to the default (`1d`); setting the
- * default removes the param again to keep URLs clean.
- */
+/** History range kept in the URL (`?range=30d`) so it survives reloads and is shareable; unknown/absent resolves to the default (`1d`), and setting the default removes the param. */
 export function useHistoryRange(): [HistoryRange, (range: HistoryRange) => void] {
   const [searchParams, setSearchParams] = useSearchParams()
   const raw = searchParams.get(RANGE_SEARCH_PARAM)

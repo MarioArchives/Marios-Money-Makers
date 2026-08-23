@@ -68,10 +68,8 @@ describe('PollCountdownBar', () => {
     expect(valueNow()).toBe(100)
   })
 
-  // Regression: on the stock page, switching 1d -> 30d -> all mounts a new
-  // history query mid-cycle. Its fetch landing must neither refill the bar
-  // nor jump it to some other partial value — every polled query refetches
-  // on the same tick, and the bar shows only that one cycle.
+  // Regression: a mid-cycle query landing (e.g. range switch) must not
+  // refill the bar or jump it — every polled query shares the one cycle.
   it('keeps the one shared cycle when another polled query lands mid-cycle (range switch)', async () => {
     const client = makeClient()
     client.setQueryData(['stocks'], { stocks: [] }, { updatedAt: Date.now() })

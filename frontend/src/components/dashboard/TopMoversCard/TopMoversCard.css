@@ -1,4 +1,2 @@
-/* The shared `.dashboard-card` treatment (surface, hairline, radius,
-   placeholder pill, description) lives once in src/styles/global.css so the
-   three placeholder cards cannot drift apart. This file is kept for the
-   4-file component convention and holds only TopMoversCard-specific rules. */
+/* Shared `.dashboard-card` treatment lives once in styles/global.css so the
+   placeholder cards cannot drift; this file holds only TopMoversCard-specific rules. */

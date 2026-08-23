@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# Run the backend locally against the mock Alpaca server (no real keys needed).
-#
-#   ./mock/dev.sh            # mock on :8500 + backend on :8000 (Ctrl-C stops both)
-#   MOCK_PORT=9000 ./mock/dev.sh
-#
-# The mock serves both the data endpoints (snapshots/bars) and the legacy
-# trading clock, so the backend is pointed at it for both
-# ALPACA_DATA_BASE_URL and ALPACA_TRADING_BASE_URL.
-#
-# Uses a separate SQLite file (backend/data/mock.db) so real data in
-# stocks.db is untouched. Start the frontend as usual (cd frontend && npm run dev).
+# Run the backend locally against the mock Alpaca server (no real keys
+# needed): ./mock/dev.sh (mock :8500 + backend :8000, Ctrl-C stops both).
+# See README.md ("Offline, against the mock") for details.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MOCK_PORT="${MOCK_PORT:-8500}"

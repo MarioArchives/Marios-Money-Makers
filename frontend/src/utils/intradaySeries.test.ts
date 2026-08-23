@@ -10,9 +10,8 @@ import {
 } from './intradaySeries'
 
 // All instants are UTC; New York is EDT (UTC-4) in August, so the regular
-// session 09:30-16:00 ET is 13:30Z-20:00Z. The series builder itself knows
-// nothing about sessions any more (the market clock lives in the backend):
-// a block marks every hole of at least MIN_HOLE_MS between consecutive bars.
+// session 09:30-16:00 ET is 13:30Z-20:00Z. The builder knows nothing about
+// sessions -- a block marks every hole >= MIN_HOLE_MS between bars.
 const point = (t: string, close: number): HistoryPoint => ({ t, close })
 const iso = (date: string, hm: string): string => `2026-08-${date}T${hm}:00Z`
 

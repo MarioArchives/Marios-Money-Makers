@@ -1,27 +1,6 @@
-"""Tests for the `/api/stocks` HTTP layer (`app.routers.stocks` + `app.main`).
-
-Uses FastAPI's `TestClient` against the real app; `app.alpaca_client` is
-mocked at the call sites the router uses (`app.routers.stocks.alpaca_client`)
-so no real network calls are made. `app.storage` is NOT mocked: the SQLite
-store is the feature under test, and every test gets its own tmp-path DB
-via a monkeypatched `app.config.DB_PATH` (which `storage` reads at call
-time). Each test also gets fresh module-level state (`_reset_state`) so
-tests never leak backoff/locks between each other. There is no in-memory
-leaderboard cache any more: the `summaries` table is the cache, so "a
-batch already succeeded once" is seeded by writing that table
-(`_prime_stale`); `tests/test_leaderboard_table.py` covers the table's
-own single-flight / lease / restart semantics in depth.
-
-Two fake clocks, mirroring the repo's established pattern:
-- `fake_clock` replaces `stocks_router._monotonic` (backoff windows).
-- `fake_utcnow` replaces `stocks_router._utcnow` (freshness windows and
-  `recorded_at` stamps).
-
-These tests describe the *intended* behavior of the Alpaca + SQLite
-migration; while the new code paths are still skeletons (bodies `raise
-NotImplementedError`), they are expected to fail/error for that reason,
-not because of import errors, missing fixtures, or broken wiring.
-"""
+"""HTTP-layer tests for `/api/stocks`. `alpaca_client` is mocked; `storage`
+(SQLite) is real and under test via a per-test tmp-path DB. `_prime_stale`
+seeds the `summaries` table to simulate "a batch already succeeded once"."""
 
 from __future__ import annotations
 
@@ -187,12 +166,9 @@ def _seed_minute_rows(ticker: str, bars: list[Bar], recorded_at: str) -> None:
 
 
 def _prime_stale(age_seconds: float = CACHE_TTL_SECONDS + 5) -> dict[str, StockSummary]:
-    """Seed "a batch fetch already succeeded once" via the `summaries` table.
-
-    The stamp is `age_seconds` in the past (relative to the real clock,
-    which is what `stocks_router._utcnow` is unless a test fakes it), i.e.
-    outside the TTL by default, so the next request attempts a refresh.
-    """
+    """Seed a prior successful batch via the `summaries` table, stamped
+    `age_seconds` in the past (default: outside the TTL, so the next
+    request attempts a refresh)."""
     good = _all_success_summaries()
     fetched_at = _iso(
         datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
@@ -271,7 +247,6 @@ class TestListStocks:
         assert failed["is_stale"] is True
         assert failed["error"] is not None
         assert failed["price"] is None
-        # Other tickers are unaffected by the one failure.
         healthy = by_ticker["AAPL"]
         assert healthy["is_stale"] is False
         assert healthy["error"] is None
@@ -400,13 +375,9 @@ class TestGetStock:
 
 
 class TestTotalFailureServesStale:
-    """A fully rate-limited batch must not blank the page.
-
-    `fetch_summaries` never raises, so an all-error batch would otherwise
-    be written over the last good rows in the `summaries` table. Fallback
-    preference on total failure: the `summaries` table marked stale ->
-    the error-flagged batch itself.
-    """
+    """A fully rate-limited batch must not blank the page: falls back to
+    the `summaries` table (marked stale), then the error-flagged batch
+    itself."""
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_total_failure_serves_last_known_good_batch_marked_stale(
@@ -424,7 +395,6 @@ class TestTotalFailureServesStale:
         # Last-known-good prices survive the failed refresh...
         assert by_ticker["AAPL"]["price"] == pytest.approx(good["AAPL"].price)
         assert by_ticker["NFLX"]["price"] == pytest.approx(good["NFLX"].price)
-        # ...and every row is flagged as not-fresh.
         for stock in body["stocks"]:
             assert stock["is_stale"] is True
 
@@ -451,10 +421,9 @@ class TestTotalFailureServesStale:
     def test_total_failure_with_cold_memory_serves_summaries_table(
         self, mock_fetch, client
     ):
-        # This process has never fetched (e.g. backend restart), but a
-        # previous process wrote the `summaries` table: the DB is the
-        # backup and must back the leaderboard -- with price AND
-        # previous_close/change intact, just flagged stale.
+        # This process has never fetched, but a previous process wrote the
+        # `summaries` table: the DB is the backup and must back the
+        # leaderboard, with price AND previous_close/change intact, stale.
         good = _prime_stale(age_seconds=3600)
         mock_fetch.return_value = _failed_batch()
 
@@ -509,10 +478,8 @@ class TestTotalFailureServesStale:
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_partial_failure_is_still_stored_as_success(self, mock_fetch, client):
-        # Only a *total* failure counts as "no fresh data"; a batch with
-        # some good rows is a normal successful refresh and must still be
-        # stored + stamped (and must not trip the backoff). The failed
-        # ticker is stored as an error row.
+        # Only a *total* failure counts as "no fresh data"; partial success
+        # is stored + stamped normally and must not trip the backoff.
         summaries = _all_success_summaries()
         summaries["NFLX"] = _summary(
             "NFLX", is_stale=True, error="alpaca error: boom"
@@ -535,12 +502,7 @@ class TestTotalFailureServesStale:
 
 class TestRateLimitBackoff:
     """Back off between refresh attempts instead of hammering Alpaca.
-
-    All timing is driven by the injected `fake_clock`; nothing sleeps.
-    These are the regression tests for the pre-existing backoff behavior,
-    which must survive the move from the in-memory cache to the
-    `summaries` table unchanged.
-    """
+    Timing is driven by `fake_clock`; nothing sleeps."""
 
     @patch("app.routers.stocks.alpaca_client.fetch_summaries")
     def test_repeat_requests_during_backoff_window_do_not_hit_alpaca(
@@ -615,10 +577,8 @@ class TestRateLimitBackoff:
     def test_fresh_table_read_during_backoff_window_does_not_reset_backoff(
         self, mock_fetch, client, fake_clock
     ):
-        # A fresh-table read performs no fetch, so it must not be mistaken
-        # for a successful refresh and clear an active backoff -- the TTL
-        # (20s) is shorter than the max backoff (600s), so that would
-        # defeat it.
+        # A fresh-table read performs no fetch; it must not be mistaken for
+        # a refresh and clear backoff (TTL is shorter than max backoff).
         mock_fetch.return_value = _success_batch()
         client.get("/api/stocks")
         stocks_router._backoff.record_failure(_all_failed_summaries())
@@ -767,11 +727,9 @@ class TestGetStockHistory:
     def test_empty_fetch_is_success_not_outage_and_counts_as_fresh(
         self, mock_fetch, client, fake_utcnow
     ):
-        # Weekend / market closed: Alpaca answers 200 with no bars. That
-        # is a *successful* fetch -- 200 with empty points, no stale flag,
-        # and no re-fetch on the next poll inside the freshness window
-        # (freshness cannot come from stored rows' recorded_at here, since
-        # nothing was stored).
+        # Weekend/market closed: Alpaca returns 200 with no bars -- a
+        # *successful* fetch (no stale flag). Freshness for the next poll
+        # can't come from recorded_at since nothing was stored.
         mock_fetch.return_value = []
 
         first = client.get("/api/stocks/AAPL/history")
@@ -790,10 +748,9 @@ class TestGetStockHistory:
     def test_leaderboard_minute_bar_writes_do_not_suppress_intraday_backfill(
         self, mock_summaries, mock_fetch, client, fake_utcnow
     ):
-        # Regression: the leaderboard poll upserts each ticker's latest
-        # minute bar (recorded_at = now). That must NOT make the minute
-        # tier look "fresh" -- a cold 1d history request right after a
-        # leaderboard poll still has to backfill the day from Alpaca.
+        # Regression: the leaderboard poll's minute-bar upsert must NOT
+        # make the minute tier look "fresh" -- a cold 1d history request
+        # right after a leaderboard poll still has to backfill from Alpaca.
         latest_ts = _iso(NOW - timedelta(minutes=1))
         mock_summaries.return_value = (
             _success_batch()[0],
@@ -877,9 +834,8 @@ class TestGetStockHistory:
         self, mock_fetch, client, fake_utcnow
     ):
         # The all-time view grows with the store: daily bars older than the
-        # Alpaca backfill window (365d) that were stored in an earlier life
-        # of the app must still be served -- the daily tier is never pruned
-        # and its read is unbounded. Only the *fetch* is bounded.
+        # 365d backfill window must still be served -- the daily tier's read
+        # is unbounded and never pruned. Only the *fetch* is bounded.
         ancient = _iso(NOW - timedelta(days=3 * 365))
         storage.upsert_bars("days", "AAPL", [_bar(ancient, 42.0)], _iso(NOW))
         mock_fetch.return_value = [_bar("2026-08-19T04:00:00Z", 95.0)]
@@ -966,11 +922,9 @@ class TestGetStockHistory:
     async def test_concurrent_requests_collapse_into_one_fetch(
         self, mock_fetch, fake_utcnow
     ):
-        # Two simultaneous requests for the same (ticker, tier) must share
-        # a single Alpaca fetch. The sleep keeps the first request "in
-        # flight" long enough for the second to arrive and block on the
-        # per-key lock; after the first completes, the second's
-        # double-checked freshness test finds the DB fresh and serves it.
+        # Two simultaneous requests for the same (ticker, tier) share a
+        # single Alpaca fetch: the sleep keeps the first in flight so the
+        # second blocks on the per-key lock, then finds the DB fresh.
         def slow_fetch(*args, **kwargs):
             time.sleep(0.2)
             return [_bar(_iso(NOW - timedelta(minutes=1)), 102.0)]
@@ -993,11 +947,9 @@ class TestGetStockHistory:
 
 
 class TestNoStragglerDailyBars:
-    """The daily tier's Alpaca fetch reaches back to the oldest stored daily
-    bar, so rows that have aged out of the 365-day backfill window are still
-    re-checked (and re-adjusted after a split) on every refresh -- no
-    stragglers. Minute/hour keep their fixed windows (prune keeps them in
-    step)."""
+    """The daily tier's fetch reaches back to the oldest stored row, so rows
+    outside the 365-day window are still re-checked (and re-adjusted after
+    a split). Minute/hour keep fixed windows."""
 
     @patch("app.routers.stocks.alpaca_client.fetch_bars")
     def test_days_fetch_starts_at_oldest_stored_row_when_older_than_window(

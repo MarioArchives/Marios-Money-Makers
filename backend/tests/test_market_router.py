@@ -1,22 +1,6 @@
-"""Tests for `GET /api/market/clock` (`app/routers/market.py`).
-
-Same conventions as `tests/test_stocks_router.py`: FastAPI's `TestClient`
-against the real app, a tmp-path SQLite DB via a monkeypatched
-`app.config.DB_PATH`, `alpaca_client.fetch_clock` patched at the reference
-the router calls (`app.routers.market.alpaca_client.fetch_clock` -- it runs
-in a worker thread, so the module-attribute patch is visible there too),
-and a frozen wall clock via `app.routers.market._utcnow`.
-
-Contract under test: the `meta` table (key `market_clock`) IS the cache.
-The stored clock is served with zero Alpaca calls until one of the
-boundaries it carries arrives -- `now` before both `next_open` and
-`next_close`. That is the ONLY expiry rule: there is no TTL, so an old
-`fetched_at` is not by itself a reason to refetch. When a boundary has
-passed, one worker (the in-process `asyncio.Lock` -- there is no
-cross-process lease any more) refetches and rewrites the key. On Alpaca failure the
-stored clock is served `is_stale=True` with the error; 503 only when
-nothing has ever been stored.
-"""
+"""Tests for `GET /api/market/clock`. Same conventions as
+`test_stocks_router.py` (tmp-path DB, frozen `_utcnow`); boundary-based
+cache-expiry rule (no TTL) is documented in README.md."""
 
 from __future__ import annotations
 
@@ -61,8 +45,7 @@ OPEN_CLOCK = MarketClock(
 )
 
 
-# A stored clock whose `next_open` has already arrived: with no TTL, a
-# passed boundary is the only thing that makes a stored clock stale.
+# next_open has already passed: this is what makes a stored clock stale.
 PASSED_CLOCK = MarketClock(
     timestamp=_iso(NOW - timedelta(hours=2)),
     is_open=False,

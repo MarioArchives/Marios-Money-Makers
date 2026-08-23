@@ -1,5 +1,8 @@
 # Mario's Money Makers (M³)
 
+> Code-level rationale — why the code is shaped the way it is — lives in
+> [ARCHITECTURE.md](ARCHITECTURE.md). This document describes what the system does.
+
 ## Overview
 
 This Repo contains a full stack application for a market tracking software. The application restricts itself to 20 stocks, the data of which is retrieved using Alpaca's API. See image below:

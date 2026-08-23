@@ -4,19 +4,14 @@
   min-height: 100vh;
 }
 
-/* Pastel-yellow bar, brass hairline, navy ink — the masthead is the one
-   tinted element so the paper-white page below stays quiet. */
 .app-shell__bar {
-  /* The scrolled/unscrolled swap is a two-beat sequence, not a cross-fade:
-     the outgoing text fades first, the bar carries no text for a beat,
-     then the incoming text fades in. The bar's own colour/padding shift
-     runs underneath across the whole sequence. */
+  /* Two-beat swap, not a cross-fade: out, gap, then in. See ARCHITECTURE.md. */
   --swap-out: 600ms;
   --swap-gap: 350ms;
   --swap-in: 900ms;
   --swap-in-delay: calc(var(--swap-out) + var(--swap-gap));
   --bar-shift: 1400ms;
-  /* Colour of the PollCountdownBar line along the bottom edge. */
+  /* Consumed by PollCountdownBar.css via var(--countdown-color, ...). */
   --countdown-color: var(--color-accent);
   --countdown-color-shift: var(--bar-shift);
 
@@ -30,8 +25,7 @@
   padding: var(--space-3) var(--space-5);
   background: var(--color-bar);
   color: var(--color-bar-text);
-  /* The 2px bottom border is drawn by PollCountdownBar (absolute, bottom
-     edge) so it can double as the poll countdown. */
+  /* +2px: PollCountdownBar draws its bar absolutely along this bottom edge. */
   padding-bottom: calc(var(--space-3) + 2px);
   transition:
     padding var(--bar-shift) var(--ease),
@@ -40,10 +34,7 @@
     box-shadow var(--bar-shift) var(--ease);
 }
 
-/* Scrolled: the bar tightens, takes the brass accent (navy ink on pastel
-   inverts to white on brass), lifts, and hands the centre to the mark. The
-   countdown line, brass at rest, flips to white so it still reads against
-   the now-brass bar. */
+/* Countdown line flips to white here so it still reads against the brass bar. */
 .app-shell__bar.is-condensed {
   --color-bar-text: #ffffff;
   --color-bar-text-muted: rgb(255 255 255 / 70%);
@@ -68,9 +59,7 @@
   letter-spacing: var(--tracking-wide);
   color: var(--color-bar-text-muted);
   padding: var(--space-1) 0;
-  /* border-bottom: 1px solid transparent; */
-  /* Colour rides the bar's own shift so the links never sit white on pastel
-     (or navy on brass) mid-transition. */
+  /* Uses --bar-shift so links don't sit the wrong colour mid-transition. */
   transition:
     color var(--bar-shift) var(--ease),
     border-color var(--motion-fast) var(--ease);
@@ -90,8 +79,6 @@
   outline-offset: 4px;
 }
 
-/* Centred masthead. Letterspaced Gill Sans — the only display type in the
-   chrome, so it reads as an engraved plate rather than an app name. */
 .app-shell__title {
   justify-self: center;
   font-family: var(--header-font);
@@ -103,8 +90,7 @@
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
   white-space: nowrap;
-  /* Returning (scrolled back to the top): the title is the *incoming* text,
-     so it waits for the mark to leave plus the gap, then fades in. */
+  /* Incoming text: waits for the mark to leave plus the gap, then fades in. */
   transition:
     opacity var(--swap-in) var(--ease) var(--swap-in-delay),
     visibility 0s linear var(--swap-in-delay);
@@ -151,11 +137,7 @@
   }
 }
 
-/* The M-cubed mark. Hidden at rest — the masthead title owns the bar —
-   and only surfaces once the page is scrolled: it simply fades in, white,
-   at the centre of the bar, in the place the title vacated. It lives at
-   the centre permanently (no slide from the right); only opacity animates.
-   At rest it is the *outgoing* text of the swap, so it fades out first. */
+/* Lives at the centre permanently (no slide from the right); only opacity animates. */
 
 .app-shell__logo {
   font-family: var(--header-font);
@@ -179,8 +161,7 @@
     visibility 0s linear var(--swap-out);
 }
 
-/* Scrolled: the mark is the *incoming* text — it waits for the title to
-   leave plus the gap, then fades in. */
+/* Incoming text: waits for the title to leave plus the gap, then fades in. */
 .app-shell__bar.is-condensed .app-shell__logo {
   opacity: 1;
   visibility: visible;

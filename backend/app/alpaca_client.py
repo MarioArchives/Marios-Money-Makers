@@ -1,69 +1,6 @@
-"""All Alpaca API calls live here, isolated from the rest of the app: both
-the Market Data API and (for the market clock) the trading API.
-
-Three entry points:
-
-- :func:`fetch_summaries` — a single ``GET /v2/stocks/snapshots`` request
-  covering every symbol in the batch. Returns both the per-symbol
-  :class:`app.schemas.StockSummary` dict *and* each symbol's latest minute
-  bar so the caller can persist it to the SQLite backup store.
-- :func:`fetch_bars` — ``GET /v2/stocks/{symbol}/bars`` for one symbol at
-  one timeframe (``1Min``/``1Hour``/``1Day``), following
-  ``next_page_token`` pagination until exhausted.
-- :func:`fetch_clock` — ``GET /v2/clock`` on the *trading* API host
-  (``app.config.ALPACA_TRADING_BASE_URL``), Alpaca's legacy market clock.
-  Same raising contract as ``fetch_bars``: request failure or a malformed
-  body raises :class:`AlpacaError` (429 flagged distinctly), never a
-  partial/best-effort result.
-
-Fault-tolerance contract:
-
-- Every 200 response is validated against the documented shape before its
-  fields are trusted: the body must be a JSON object (not an HTML error
-  page, not a bare JSON array/scalar); each bar's ``t`` must be a string
-  :func:`normalize_timestamp` can parse and its ``o``/``h``/``l``/``c``/
-  ``v``/``vw``/``n`` must all be present and numeric (``bool`` and
-  non-finite floats do not count, so a boolean or a numeric string like
-  ``"310.85"`` is rejected rather than silently stored as SQLite ``REAL``
-  junk). A mismatched top-level ``symbol``, or a ``bars``/
-  ``next_page_token`` of the wrong type, is likewise rejected — the
-  latter is checked *before* it is followed, so a malformed token can't
-  spin the paginator forever. None of this is ever mistaken for rate
-  limiting. Unknown extra keys are ignored.
-- ``fetch_summaries`` NEVER raises. A request-level failure (network
-  error, 429, any non-2xx, or a malformed/non-object body) produces an
-  all-error batch — every requested symbol present, ``is_stale=True``,
-  ``error`` set — with rate limiting flagged distinctly via
-  :data:`RATE_LIMIT_ERROR_PREFIX` so the router's backoff can tell
-  "Alpaca is throttling us" apart from "this symbol is broken". A symbol
-  missing from an otherwise-good response, a snapshot entry that isn't an
-  object, or a present-but-wrong-typed price-path field
-  (``latestTrade.p``/``minuteBar.c``/``dailyBar.c``/``prevDailyBar.c``)
-  degrades only that symbol to a per-symbol error entry; a missing or
-  ``None`` field still falls through to the next fallback exactly as
-  before. A malformed ``minuteBar`` on an otherwise-good snapshot keeps
-  the summary but is skipped for persistence (logged as a warning) so the
-  leaderboard never degrades over a persistence-only field.
-- ``fetch_bars`` DOES raise (:class:`AlpacaError`) on request-level
-  failure *or* a malformed shape — its caller decides whether SQLite can
-  cover for the outage. The whole fetch fails atomically (no partial
-  list), even when the malformed bar is on a later page after good ones.
-  A legitimately empty bar list (weekend, market closed, thin IEX data,
-  ``bars`` null/absent) is NOT an error: it returns ``[]``.
-
-Requests carry the ``APCA-API-KEY-ID`` / ``APCA-API-SECRET-KEY`` headers
-(from ``app.config.ALPACA_KEY_ID`` / ``ALPACA_SECRET_KEY``, read at call
-time) and ``feed=iex`` (free plan). Bars requests send ``start`` but no
-``end`` (Alpaca defaults to "now", which the IEX feed may serve without
-the paid plan's 15-minute SIP restriction), plus
-``adjustment=<ALPACA_BARS_ADJUSTMENT>`` (default ``split``) so history is
-split-adjusted rather than Alpaca's default as-traded ``raw`` prices; the
-snapshots request has no adjustment param and never sends one. The clock
-request has no ``feed`` param either -- it isn't feed-scoped -- and goes
-to the trading host instead of the data host the other two use.
-
-Timestamps are normalized to exactly ``YYYY-MM-DDTHH:MM:SSZ`` (UTC) so
-that lexicographic string comparison in SQLite equals chronological order.
+"""All Alpaca API calls live here: the Market Data API, plus the trading
+API for the market clock. See README.md for the full validation contract.
+``fetch_summaries`` never raises; ``fetch_bars``/``fetch_clock`` do.
 """
 
 from __future__ import annotations
@@ -78,34 +15,24 @@ import httpx
 
 from app.schemas import StockSummary
 
-# Currency Alpaca quotes US equities in.
 USD = "USD"
 
-# Error-message prefixes. The rate-limit prefix lets callers (and the UI)
-# tell "Alpaca is throttling us" apart from "this symbol is broken".
+# Rate-limit prefix lets callers tell "Alpaca is throttling us" apart from
+# "this symbol is broken".
 ERROR_PREFIX = "alpaca error"
 RATE_LIMIT_ERROR_PREFIX = "alpaca rate limited"
 
-# Alpaca timeframe strings for the three storage tiers.
 TIMEFRAME_MINUTE = "1Min"
 TIMEFRAME_HOUR = "1Hour"
 TIMEFRAME_DAYS = "1Day"
 
-# Test seam: when set (an ``httpx.BaseTransport``, e.g. ``httpx.MockTransport``),
-# `_client()` builds its ``httpx.Client`` on top of it so tests exercise the
-# full request/response path without the network.
+# Test seam: when set, `_client()` builds on this transport (no network).
 _transport: httpx.BaseTransport | None = None
 
 
 @dataclass(frozen=True)
 class Bar:
-    """One price bar, ready for the SQLite store.
-
-    - ``ts``: bar time, normalized ISO-8601 UTC (``YYYY-MM-DDTHH:MM:SSZ``)
-    - ``price``: the bar's close (``c``)
-    - ``analytics``: ``json.dumps`` of the raw Alpaca bar fields
-      ``{"o", "h", "l", "c", "v", "vw", "n"}``
-    """
+    """One price bar; ``ts`` is ``YYYY-MM-DDTHH:MM:SSZ``, ``price`` is the close."""
 
     ts: str
     price: float
@@ -114,8 +41,7 @@ class Bar:
 
 @dataclass(frozen=True)
 class MarketClock:
-    """Alpaca's market clock (``GET /v2/clock``), timestamps normalised to
-    ``YYYY-MM-DDTHH:MM:SSZ``."""
+    """Alpaca's market clock; timestamps normalised to ``YYYY-MM-DDTHH:MM:SSZ``."""
 
     timestamp: str
     is_open: bool
@@ -124,22 +50,10 @@ class MarketClock:
 
 
 def fetch_clock() -> MarketClock:
-    """Fetch Alpaca's legacy market clock: ``GET /v2/clock`` on the
-    *trading* API host (``app.config.ALPACA_TRADING_BASE_URL``), never the
-    data host. No ``feed`` param -- the clock isn't feed-scoped.
+    """Fetch Alpaca's market clock (``GET /v2/clock``, trading API host).
 
-    Same raising contract as :func:`fetch_bars`: a network error or any
-    non-2xx response raises :class:`AlpacaError` (429 flagged
-    ``is_rate_limit=True`` with the rate-limit message prefix; other
-    non-2xx a plain error). The body must be a JSON object with
-    ``is_open`` a real ``bool`` (not ``"true"``/``1``/``0``/``None`` --
-    those are malformed, never mistaken for rate limiting) and
-    ``timestamp``/``next_open``/``next_close`` each a string
-    :func:`normalize_timestamp` can parse; a missing/wrong-typed/
-    unparseable field raises a malformed :class:`AlpacaError` naming the
-    field. Unknown extra keys (``phase``, ``market``, ...) are ignored.
-    Returns a :class:`MarketClock` with all three timestamps normalized to
-    ``YYYY-MM-DDTHH:MM:SSZ`` UTC.
+    Raises :class:`AlpacaError` on request failure or a malformed body
+    (429 flagged ``is_rate_limit=True``); never a partial result.
     """
     from app import config
 
@@ -207,16 +121,8 @@ def is_rate_limit_error(message: str | None) -> bool:
 
 
 def normalize_timestamp(raw: str) -> str:
-    """Normalize an Alpaca RFC3339 timestamp to ``YYYY-MM-DDTHH:MM:SSZ``.
-
-    Handles fractional seconds (``2026-08-19T13:30:00.123456789Z``) and
-    any UTC offset -- ``+00:00`` (data-API bars) as well as non-UTC
-    offsets like ``-04:00`` (the trading-API clock's New York stamps).
-    A non-UTC offset is *converted* to the equivalent UTC instant (not
-    merely relabelled ``Z``); a naive datetime (no offset at all) is
-    treated as already UTC. Output always uses the ``Z`` suffix so string
-    ordering equals chronological ordering.
-    """
+    """Normalize an Alpaca RFC3339 timestamp to exactly ``YYYY-MM-DDTHH:MM:SSZ``
+    UTC, so lexicographic string comparison equals chronological order."""
     normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
     dt = datetime.fromisoformat(normalized)
     if dt.tzinfo is None:
@@ -227,13 +133,7 @@ def normalize_timestamp(raw: str) -> str:
 
 
 def _json_object(response: httpx.Response) -> dict | None:
-    """Return the parsed JSON body if it's an object, else ``None``.
-
-    ``None`` signals a malformed response: the body isn't valid JSON at all
-    (``response.json()`` raises ``ValueError`` — e.g. an HTML maintenance
-    page) or it parses to something other than a JSON object (a list, a
-    scalar).
-    """
+    """Return the parsed JSON body if it's an object, else ``None`` (malformed)."""
     try:
         body = response.json()
     except ValueError:
@@ -242,8 +142,7 @@ def _json_object(response: httpx.Response) -> dict | None:
 
 
 def _is_numeric(value: object) -> bool:
-    """True for a real, finite number — excludes ``bool`` (a ``bool`` is an
-    ``int`` subclass) and non-finite floats (``NaN``/``inf``)."""
+    """True for a real, finite number — excludes ``bool`` and ``NaN``/``inf``."""
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -252,15 +151,8 @@ def _is_numeric(value: object) -> bool:
 
 
 def _parse_bar(raw: object, context: str) -> Bar:
-    """Parse one Alpaca bar dict into a :class:`Bar`.
-
-    Used by both ``fetch_bars`` and ``fetch_summaries`` (for the snapshot's
-    ``minuteBar``). Raises ``ValueError`` — never `KeyError`/`TypeError`/
-    `AttributeError` — naming ``context`` and the offending field when
-    ``raw`` doesn't match the documented ``{t, o, h, l, c, v, vw, n}``
-    shape. Callers decide how to surface the ``ValueError`` (raise an
-    :class:`AlpacaError`, or degrade a single entry).
-    """
+    """Parse one Alpaca bar dict into a :class:`Bar`; raises ``ValueError``
+    (never ``KeyError``/``TypeError``) naming ``context`` and the bad field."""
     if not isinstance(raw, dict):
         raise ValueError(f"{context}: bar is not an object")
 
@@ -285,15 +177,8 @@ def _parse_bar(raw: object, context: str) -> Bar:
 
 
 def _client(base_url: str | None = None) -> httpx.Client:
-    """Build an ``httpx.Client`` for an Alpaca API host.
-
-    ``base_url`` defaults to ``app.config.ALPACA_DATA_BASE_URL`` (the
-    market data API); pass ``app.config.ALPACA_TRADING_BASE_URL`` for
-    trading-API endpoints like ``GET /v2/clock``. Credentials and the
-    request timeout (``ALPACA_TIMEOUT_SECONDS``) are read from
-    ``app.config`` at call time (monkeypatch-friendly); ``_transport`` is
-    injected when set.
-    """
+    """Build an ``httpx.Client`` for an Alpaca API host; credentials and
+    timeout are read from ``app.config`` at call time so tests can monkeypatch."""
     from app import config
 
     headers = {
@@ -315,21 +200,8 @@ def fetch_summaries(
 ) -> tuple[dict[str, StockSummary], dict[str, Bar]]:
     """Fetch live summaries for ``symbols`` with ONE snapshots request.
 
-    Returns ``(summaries, minute_bars)``:
-
-    - ``summaries``: dict keyed by each input symbol (every symbol present,
-      even on failure). Per symbol: ``price`` from ``latestTrade.p``
-      (falling back to ``minuteBar.c`` then ``dailyBar.c``),
-      ``previous_close`` from ``prevDailyBar.c``, ``change``/
-      ``change_percent`` derived, ``currency="USD"``, name/sector from
-      :data:`app.tickers.TICKERS_BY_SYMBOL`. A missing ``prevDailyBar``
-      (thin IEX data) keeps the price and leaves ``previous_close``/
-      ``change``/``change_percent`` as ``None`` — NOT an error entry.
-    - ``minute_bars``: each successfully parsed symbol's ``minuteBar`` as a
-      :class:`Bar`, for persistence into the ``bars_minute`` table. Empty
-      on request-level failure; symbols without a minute bar are absent.
-
-    Never raises; see the module docstring's fault-tolerance contract.
+    NEVER raises: a request-level failure returns an all-error batch
+    (every symbol present, ``is_stale=True``) instead of raising.
     """
     from app import config
     from app.tickers import TICKERS_BY_SYMBOL
@@ -373,10 +245,8 @@ def fetch_summaries(
         )
 
     def _numeric_field(parent: object, key: str, context: str) -> float | None:
-        """Read ``parent[key]``, treating missing/``None`` as "no value yet
-        — fall through to the next fallback" (today's behaviour), but
-        raising ``ValueError`` when ``parent`` is present-but-not-an-object
-        or the field is present-but-not-numeric."""
+        """Missing/``None`` falls through to the next price fallback;
+        present-but-wrong-typed raises ``ValueError`` (a real error)."""
         if parent is None:
             return None
         if not isinstance(parent, dict):
@@ -487,10 +357,8 @@ def fetch_summaries(
 def fetch_bars(symbol: str, timeframe: str, start: datetime) -> list[Bar]:
     """Fetch all bars for ``symbol`` at ``timeframe`` from ``start`` to now.
 
-    Follows ``next_page_token`` pagination, concatenating pages in order.
-    Returns ``[]`` for a legitimately empty response (not an error).
-    Raises :class:`AlpacaError` on any request-level failure (429 flagged
-    with ``is_rate_limit=True`` and the rate-limit message prefix).
+    Raises :class:`AlpacaError` and fails atomically on any request-level
+    or shape failure; a legitimately empty result returns ``[]``.
     """
     from app import config
 

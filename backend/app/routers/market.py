@@ -1,42 +1,6 @@
-"""``/api/market`` routes: the Alpaca market clock.
-
-One endpoint, ``GET /clock``. The ``meta`` table (key
-:data:`app.storage.MARKET_CLOCK_META_KEY`) IS the cache -- there is no
-in-memory copy, exactly like the leaderboard's ``summaries`` table and
-history's bar tables.
-
-Freshness rule: the stored clock is served with zero Alpaca calls until
-one of the boundaries it carries arrives -- ``now`` must be strictly
-before BOTH ``next_open`` and ``next_close``. The state a clock describes
-cannot change before then, so nothing else expires it: one fetched on
-Friday afternoon is still the right answer on Sunday night ("closed,
-opens Monday 09:30"), and the moment that open arrives it is wrong data
-and must be refetched.
-
-There is deliberately no time-based TTL on top of that. It would refetch
-clocks that are still correct -- a browser polling every 20s would mean
-~1000 Alpaca calls a day -- to narrow the window on the one thing a
-boundary check cannot see: a session the exchange re-schedules *after* we
-cached it (an unscheduled closure or early close). That is rare enough to
-accept; such a change is picked up at the next boundary crossing. An
-unparseable stored boundary counts as stale, so a corrupt row is
-refetched rather than trusted.
-
-Single flight, same shape as the stocks router: an in-process
-``asyncio.Lock`` (double-checked freshness after acquiring) is the whole
-guarantee -- this app only ever runs as a single process, so there is no
-cross-process lease to take on top of it.
-
-Failure policy: an Alpaca failure serves the stored clock with
-``is_stale=True`` and ``error`` set (the ``meta`` row is left untouched),
-UNLESS nothing has ever been stored, in which case the request 503s. No
-backoff -- unlike the leaderboard, a failed clock fetch does not block the
-very next request from trying Alpaca again.
-
-:func:`refresh_clock` is the same refresh, exposed for
-:mod:`app.backfill`'s periodic sweep: it swallows any
-:class:`app.alpaca_client.AlpacaError` (logged at WARNING) so a clock
-outage never stops the sweep's bar-tier pass.
+"""``/api/market`` routes: the Alpaca market clock, cached in the ``meta``
+table with no TTL — see README.md for the freshness/single-flight/failure
+contract. ``GET /clock`` 503s only when Alpaca is down and nothing is cached.
 """
 
 from __future__ import annotations
@@ -56,9 +20,7 @@ logger = logging.getLogger("app.routers.market")
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
-# In-process single-flight locks, keyed like `stocks._refresh_locks` (there
-# is only ever one key here, `_CLOCK_LOCK_KEY`). Tests reset this to `{}`
-# between cases.
+# In-process single-flight lock; tests reset this to `{}` between cases.
 _CLOCK_LOCK_KEY = "clock"
 _refresh_locks: dict[str, asyncio.Lock] = {}
 
@@ -68,10 +30,9 @@ def _utcnow() -> datetime:
 
 
 def _is_fresh(stored: storage.StoredClock, now: datetime) -> bool:
-    """True while the stored clock still describes the present: ``now`` is
-    before both boundaries it carries. ``fetched_at`` plays no part (see
-    the module docstring on why there is no TTL); an unparseable boundary
-    counts as stale."""
+    """True while ``now`` is before both ``next_open`` and ``next_close``;
+    deliberately no TTL on top of this (``fetched_at`` plays no part) — an
+    unparseable boundary counts as stale."""
     next_open_dt = _parse_iso(stored.next_open)
     if next_open_dt is None or now >= next_open_dt:
         return False
@@ -82,13 +43,9 @@ def _is_fresh(stored: storage.StoredClock, now: datetime) -> bool:
 
 
 async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
-    """Return ``(stored_clock, is_stale, error)``, refreshing via Alpaca
-    when the stored clock is missing or stale (see the module docstring).
-
-    Raises :class:`AlpacaError` iff the fetch itself failed and nothing was
-    ever stored. Callers decide how to surface that (503 for the endpoint,
-    logged-and-swallowed for the sweep's :func:`refresh_clock`).
-    """
+    """Return ``(stored_clock, is_stale, error)``, refreshing via Alpaca when
+    missing/stale. Raises :class:`AlpacaError` iff the fetch failed and
+    nothing was ever stored."""
     storage.init_db()
     now = _utcnow()
     stored = storage.get_market_clock()
@@ -97,9 +54,7 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
 
     lock = _refresh_locks.setdefault(_CLOCK_LOCK_KEY, asyncio.Lock())
     async with lock:
-        # Double-checked: the leader we queued behind may have refreshed
-        # (serve fresh) or failed (serve stale, no backoff -- try again on
-        # the next request) meanwhile.
+        # Double-checked: the leader we queued behind may have refreshed already.
         now = _utcnow()
         stored = storage.get_market_clock()
         if stored is not None and _is_fresh(stored, now):
@@ -131,9 +86,7 @@ async def _get_clock() -> tuple[storage.StoredClock, bool, str | None]:
 async def get_market_clock() -> MarketClockResponse:
     """Return Alpaca's market clock, cached in SQLite.
 
-    See the module docstring for the freshness/single-flight/failure
-    rules. 503s only when Alpaca is down (or its lease is held elsewhere)
-    AND nothing has ever been cached.
+    Raises 503 only when Alpaca is down and nothing has ever been cached.
     """
     try:
         stored, is_stale, error = await _get_clock()
@@ -151,13 +104,8 @@ async def get_market_clock() -> MarketClockResponse:
 
 
 async def refresh_clock() -> None:
-    """Refresh the cached market clock if it is stale; used by
-    :mod:`app.backfill`'s sweep.
-
-    Same fresh-skipping, single-flight refresh as the endpoint, but never
-    raises for Alpaca reasons: a failure is logged at WARNING and
-    swallowed so a clock outage never stops the sweep's bar-tier pass.
-    """
+    """Refresh the cached market clock if stale, for :mod:`app.backfill`'s
+    sweep; never raises for Alpaca reasons (logged at WARNING and swallowed)."""
     try:
         await _get_clock()
     except AlpacaError as exc:

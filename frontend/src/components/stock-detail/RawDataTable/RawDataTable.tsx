@@ -20,11 +20,8 @@ export const TIER_LABELS: Record<StoredTier, string> = {
   days: 'Daily',
 }
 
-/**
- * Alpaca bar fields inside the stored `analytics` JSON, in display order.
- * `unit` is the header suffix; `null` means "the stock's native currency"
- * (the response's `currency`, USD for Alpaca) and is resolved at render.
- */
+/** Alpaca bar fields in the stored `analytics` JSON. `unit: null` means the
+ * stock's native currency, resolved at render. */
 const ANALYTICS_COLUMNS: ReadonlyArray<{ key: string; label: string; unit: string | null }> = [
   { key: 'o', label: 'Open', unit: null },
   { key: 'h', label: 'High', unit: null },
@@ -35,11 +32,7 @@ const ANALYTICS_COLUMNS: ReadonlyArray<{ key: string; label: string; unit: strin
   { key: 'n', label: 'Trades', unit: 'count' },
 ]
 
-/**
- * Column header: label plus a muted unit suffix. The unit is plain text
- * inside the `<th>` so it is part of the header's accessible name
- * (e.g. "Price (USD)").
- */
+/** Unit is plain text inside the `<th>` so it's part of the accessible name (e.g. "Price (USD)"). */
 function ColumnHeader({
   label,
   unit,
@@ -66,26 +59,9 @@ function cell(value: unknown): string {
 const countFormatter = new Intl.NumberFormat('en-US')
 
 /**
- * Raw view of everything the backend's SQLite store holds for this stock:
- * every row of one tier's `bars_<tier>` table, every column (`ts`,
- * `price`, the stored Alpaca analytics — open/high/low/close/volume/
- * VWAP/trade count — and `recorded_at`), newest first, plus per-tier row
- * counts and the tier's last successful Alpaca fetch. Backed by
- * `useStoredDataQuery(ticker, tier)`; polls only that query (never the
- * detail/price or history queries).
- *
- * The tier shown defaults to the one behind the page's history `range`
- * and follows it when the range changes; the in-card switch overrides it
- * for the current range only. The extra "Close (GBP)" column converts the
- * stored close at the shared `FxRateProvider` rate; it disappears when no
- * rate is available. The stored figures themselves are never altered —
- * this is the raw data. Every header carries its unit: the response's
- * `currency` for the stored money columns (falling back to USD), GBP for
- * the converted column, `shares`/`count` for volume/trades and UTC for the
- * timestamps.
- *
- * When the query fails, the last received rows stay in place and the card
- * greys out — no error text takes the table's place.
+ * Raw view of every stored bar for `ticker` at the picked tier (defaults to
+ * the range's tier; the in-card switch overrides for that range only).
+ * See ARCHITECTURE.md for the full column/tier/degradation contract.
  */
 function RawDataTableComponent({ ticker, range = DEFAULT_HISTORY_RANGE }: RawDataTableProps): JSX.Element {
   const [picked, setPicked] = useState<{ forRange: HistoryRange; tier: StoredTier } | null>(null)
@@ -179,10 +155,5 @@ function RawDataTableComponent({ ticker, range = DEFAULT_HISTORY_RANGE }: RawDat
   )
 }
 
-/**
- * Memoised: the table is the heaviest subtree on the page (every stored
- * row, ~1 440 in the minute tier), so it must re-render only for its own
- * query data, a tier pick or a ticker/range change — never because the
- * parent page re-rendered.
- */
+/** Memoised: heaviest subtree on the page (~1,440 rows in the minute tier); must not re-render on parent updates. */
 export const RawDataTable = memo(RawDataTableComponent)

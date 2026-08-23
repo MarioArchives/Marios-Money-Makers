@@ -22,27 +22,9 @@ function directionClass(changePercent: number | null): 'up' | 'down' | 'flat' {
 }
 
 /**
- * A single leaderboard row, laid out as the wireframe's three-column pill:
- * name (+ icon) | price | stats. A coloured spine down the leading edge
- * carries the direction before the reader gets to the number.
- *
- * Degraded rows — `is_stale` and/or a per-stock `error` from the backend —
- * are greyed out rather than annotated: the last known price stays on
- * screen (an em dash if there has never been one), the spine drops to
- * neutral, and a single muted dot marks the row. No error text: a
- * rate-limited upstream feed is not something the reader can act on.
- *
- * Prices are displayed in GBP, converted at the shared `FxRateProvider`
- * rate (`formatDisplayPrice`); until a rate is available the native
- * figure shows instead, so the board never goes blank.
- *
- * `rankDelta` (set briefly by `StockTable` after a re-rank) adds a small
- * `▲n`/`▼n` chip after the ticker.
- *
- * Wrapped in `React.memo` so unchanged rows (same `stock` object reference,
- * per the leaderboard's structural-sharing query data, and no rank-delta
- * change) skip re-rendering when the parent `StockTable`/`LeaderboardPage`
- * re-renders.
+ * A single leaderboard row: name/icon, GBP-converted price, stats. Degraded
+ * rows (`is_stale`/`error`) grey out with no error text rather than annotate.
+ * Memoised on the `stock` reference — see ARCHITECTURE.md.
  */
 function StockRowComponent({ stock, rankDelta }: StockRowProps): JSX.Element {
   const { rate } = useFxRate()

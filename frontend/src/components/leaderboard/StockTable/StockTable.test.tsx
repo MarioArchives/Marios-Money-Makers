@@ -88,10 +88,7 @@ describe('StockTable reordering', () => {
   })
 })
 
-/**
- * jsdom has no layout, so every getBoundingClientRect() is 0 and the FLIP
- * pass is a no-op by default. These tests stub the rects to drive it.
- */
+/** jsdom has no layout, so these tests stub getBoundingClientRect() to drive the FLIP pass. */
 describe('StockTable FLIP reorder', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -185,10 +182,8 @@ describe('StockTable FLIP reorder', () => {
   })
 
   it('does not re-measure on a re-render of the same board (rows in flight would read as a move back)', () => {
-    // A slot's rect includes its current transform, so mid-slide it reports
-    // its *old* spot. Mimic that: after the reorder, rects report the
-    // pre-reorder layout. A same-board re-render must not run the FLIP
-    // pass again and flip every direction.
+    // Mimic mid-slide: after the reorder, rects still report pre-reorder
+    // layout, since a slot's rect includes its current transform.
     let inFlight = false
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       if (this.classList.contains('stock-table__rows')) {
@@ -315,10 +310,7 @@ describe('StockTable FLIP reorder', () => {
   })
 })
 
-/**
- * The rank-delta chip is driven by list order alone (no layout needed), so
- * these run without the rect stub.
- */
+/** Rank-delta chips are driven by list order alone, so these run without the rect stub. */
 describe('StockTable rank-delta chips', () => {
   afterEach(() => {
     vi.useRealTimers()

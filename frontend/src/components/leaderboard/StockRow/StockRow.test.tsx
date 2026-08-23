@@ -87,12 +87,7 @@ describe('StockRow', () => {
   })
 })
 
-/**
- * v3 error UX (replaces the pre-v3 "renders an ErrorBadge reflecting
- * is_stale/error state" assertion): a stock without fresh data is greyed
- * out and keeps its last known figures, rather than being annotated with
- * the backend's error text.
- */
+/** Degraded state: greyed out with last known figures, no error text (v3 UX). */
 describe('StockRow degraded state', () => {
   it('greys the row out when the stock is stale', () => {
     renderRow(makeStock({ is_stale: true, error: null }))
@@ -203,11 +198,7 @@ describe('StockRow memoization', () => {
   })
 })
 
-/**
- * Every price on the board is displayed in GBP, converted at the shared
- * FxRateProvider rate; the native figure is only a fallback for when no
- * rate is available (the tests above render without a provider).
- */
+/** GBP conversion via FxRateProvider; native figure is the fallback with no rate. */
 describe('StockRow GBP display', () => {
   const rate = { base: 'USD', quote: 'GBP', rate: 0.5, date: '2026-08-20', source: 'ECB' } as const
 

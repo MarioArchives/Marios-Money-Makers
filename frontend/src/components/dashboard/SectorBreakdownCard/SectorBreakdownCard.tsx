@@ -1,11 +1,7 @@
 import type { SectorBreakdownCardProps } from './SectorBreakdownCard.props'
 import './SectorBreakdownCard.css'
 
-/**
- * Placeholder dashboard card. Per the plan, `DashboardPage` makes no
- * network calls — this card is fully static, hardcoded content by design,
- * not a skeleton awaiting real data wiring.
- */
+/** Placeholder card — see README.md ("dashboard page is placeholder cards only"). */
 export function SectorBreakdownCard(_props: SectorBreakdownCardProps): JSX.Element {
   void _props
   return (

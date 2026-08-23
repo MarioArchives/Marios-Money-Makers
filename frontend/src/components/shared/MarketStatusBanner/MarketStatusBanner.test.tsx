@@ -5,10 +5,7 @@ import { MarketStatusBanner } from './MarketStatusBanner'
 import { useMarketClockQuery } from '../../../api/queries'
 import type { MarketClockResponse } from '../../../api/types'
 
-// The banner's only data source is the backend clock (`GET /api/market/clock`
-// via `useMarketClockQuery`); the countdown itself ticks locally from
-// `Date.now()` against the fetched `next_open` / `next_close`. The query
-// module is mocked so these tests say "given this clock, render this".
+// Query module mocked so these tests say "given this clock, render this".
 vi.mock('../../../api/queries', () => ({
   useMarketClockQuery: vi.fn(),
 }))

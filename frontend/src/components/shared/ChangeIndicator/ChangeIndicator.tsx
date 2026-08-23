@@ -2,12 +2,7 @@ import type { ChangeIndicatorProps } from "./ChangeIndicator.props";
 import "./ChangeIndicator.css";
 import { useEffect, useState } from "react";
 
-/**
- * Percentage move against the previous close. Direction is carried by
- * colour *and* by a glyph, so it survives greyed-out (stale) rows and
- * colour-blind readers alike.
- */
-
+/** Direction is carried by colour and a glyph, so it survives stale rows and colour-blind readers. */
 export function ChangeIndicator({
   changePercent,
 }: ChangeIndicatorProps): JSX.Element {

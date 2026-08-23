@@ -1,9 +1,6 @@
 export interface ErrorBadgeProps {
   /** True when the backend served a cached/last-known value for this stock. */
   isStale: boolean
-  /**
-   * The backend's per-stock error, if any. Used only as a second signal
-   * that the entry is degraded — the string itself is never rendered.
-   */
+  /** Per-stock error, if any — used only as a degraded signal, never rendered. */
   error?: string | null
 }

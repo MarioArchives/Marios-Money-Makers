@@ -1,13 +1,6 @@
-"""Tests for `app.storage` — the three-table SQLite backup store.
-
-Every test runs against its own tmp-path DB by monkeypatching
-`app.config.DB_PATH` (which `storage` reads at call time, per its module
-contract). No mocking: this is the real persistence layer.
-
-Row contract (all three tables): ticker, price, analytics (JSON string of
-the raw Alpaca bar fields), ts (bar time, ISO-8601 UTC "...Z"), and
-recorded_at (fetch time, same format), with PRIMARY KEY (ticker, ts).
-"""
+"""Tests for `app.storage`, the three-table SQLite backup store: real
+persistence, per-test tmp-path DB (monkeypatched `config.DB_PATH`). Row
+shape: ticker, price, analytics(JSON), ts (ISO-8601 UTC), recorded_at."""
 
 from __future__ import annotations
 
@@ -410,10 +403,9 @@ class TestMeta:
 
 
 class TestEnsureBarsAdjustment:
-    """`ensure_bars_adjustment` heals DBs whose bars were fetched under a
-    different Alpaca `adjustment` mode by dropping the bar-tier fetch_log
-    stamps (so the next request/sweep refetches and overwrites) -- exactly
-    once per change, never touching bar rows or the summaries stamp."""
+    """`ensure_bars_adjustment` heals a bars-adjustment change by dropping
+    the bar-tier fetch_log stamps (forcing a refetch), exactly once per
+    change; bar rows and the summaries stamp are untouched."""
 
     def _stamp_everything(self):
         for tier in storage.TIERS:
@@ -489,11 +481,9 @@ class TestEnsureBarsAdjustment:
 
 
 class TestUpsertBarsRecordedAtGating:
-    """``recorded_at`` means "when this price was last recorded": a
-    re-upsert that brings the same price leaves the stamp alone (price and
-    stamp), only a real price change (e.g. a split re-adjusting history)
-    moves it. ``analytics`` is always refreshed (the live bar's volume keeps
-    growing)."""
+    """`recorded_at` means "when this price was last recorded": a same-price
+    re-upsert leaves it alone; only a real price change (e.g. a split)
+    moves it. `analytics` is always refreshed."""
 
     def test_new_row_is_stamped_with_the_given_recorded_at(self):
         storage.init_db()
@@ -596,8 +586,6 @@ class TestOldestTs:
         with pytest.raises(ValueError):
             storage.oldest_ts("weekly", "AAPL")
 
-
-# --- market clock in `meta` ---------------------------------------------------
 
 CLOCK = MarketClock(
     timestamp="2026-08-20T11:59:30Z",
@@ -707,11 +695,9 @@ def _tables() -> set[str]:
 
 
 class TestLegacyFetchClaimsDropped:
-    """`fetch_claims` (the cross-process fetch lease) was removed. A DB file
-    written by an older build still has the table; `init_db` drops it once.
-    Claims were ephemeral -- a row only ever lived for one fetch -- so there
-    is nothing to preserve, and leaving a dead table behind would be a
-    straggler."""
+    """`fetch_claims` (the cross-process lease) was removed; `init_db` drops
+    the table once if an older build left it behind. Claims were ephemeral,
+    so there is nothing to preserve."""
 
     _CURRENT_SCHEMA = (
         "CREATE TABLE fetch_claims ("

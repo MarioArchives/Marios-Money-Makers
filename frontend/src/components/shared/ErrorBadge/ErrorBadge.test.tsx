@@ -2,12 +2,7 @@ import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import { ErrorBadge, STALE_LABEL } from './ErrorBadge'
 
-/**
- * v3 error UX: this component no longer renders verbose per-row error text.
- * A degraded stock is communicated by greying its row (see StockRow) plus
- * the single muted dot rendered here. Each assertion below replaces the
- * equivalent pre-v3 badge assertion.
- */
+/** v3 error UX: no per-row error text, just the greyed row (StockRow) and this muted dot. */
 describe('ErrorBadge', () => {
   it('renders nothing when fresh and error-free', () => {
     const { container } = render(<ErrorBadge isStale={false} error={null} />)

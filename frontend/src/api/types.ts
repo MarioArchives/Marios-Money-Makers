@@ -16,11 +16,7 @@ export interface StocksResponse {
   stocks: StockSummary[]
 }
 
-/**
- * Backend `?range=` values for `/api/stocks/{ticker}/history`. `all` is the
- * all-time view: every daily bar the backend has ever stored for the
- * ticker (the daily tier is never pruned), so it grows over time.
- */
+/** Backend `?range=` values; `all` is every daily bar ever stored for the ticker (never pruned), so it grows over time. */
 export const HISTORY_RANGES = ['1d', '30d', 'all'] as const
 export type HistoryRange = (typeof HISTORY_RANGES)[number]
 export const DEFAULT_HISTORY_RANGE: HistoryRange = '1d'
@@ -43,11 +39,7 @@ export interface HistoryResponse {
   error: string | null
 }
 
-/**
- * SQLite tiers behind `/api/stocks/{ticker}/stored?tier=`. The table names
- * are `bars_<tier>`; `days` holds daily bars and is the never-pruned
- * long-term tier.
- */
+/** SQLite tiers behind the stored-data endpoint; table names are `bars_<tier>`, `days` is the never-pruned long-term tier. */
 export const STORED_TIERS = ['minute', 'hour', 'days'] as const
 export type StoredTier = (typeof STORED_TIERS)[number]
 
@@ -88,11 +80,7 @@ export interface FxRate {
   source: string
 }
 
-/**
- * `GET /api/market/clock`: Alpaca's market clock as cached by the backend
- * (all timestamps `YYYY-MM-DDTHH:MM:SSZ`). `is_stale`/`error` follow the
- * same convention as every other response.
- */
+/** Alpaca's market clock as cached by the backend (timestamps `YYYY-MM-DDTHH:MM:SSZ`); `is_stale`/`error` follow the same convention as every other response. */
 export interface MarketClockResponse {
   timestamp: string
   is_open: boolean

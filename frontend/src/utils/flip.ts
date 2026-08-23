@@ -1,14 +1,4 @@
-/**
- * The "invert" step of a FLIP (First-Last-Invert-Play) reorder animation,
- * as pure arithmetic so it can be unit-tested without layout.
- *
- * Given each item's position before (`first`) and after (`last`) a DOM
- * commit — both measured in the *same* frame of reference, e.g. relative
- * to the list container so page scroll never counts as movement — return
- * the offset (`first - last`) that, applied as `translateY`, puts an item
- * visually back where it started. Items that did not move, or that exist
- * in only one of the two snapshots (entered/left), are omitted.
- */
+/** The "invert" step of a FLIP reorder animation, as pure arithmetic. Given each item's position before (`first`) and after (`last`) in the same frame of reference, returns the offset (`first - last`) that, applied as `translateY`, puts it back where it started; unmoved/one-sided items are omitted. */
 export function computeFlipOffsets(
   first: ReadonlyMap<string, number>,
   last: ReadonlyMap<string, number>,
@@ -27,12 +17,7 @@ export function computeFlipOffsets(
   return offsets
 }
 
-/**
- * Rank change per item between two orderings, as `oldRank - newRank`:
- * positive = climbed that many places, negative = fell. Same arithmetic
- * as `computeFlipOffsets` (old minus new, unchanged/entered/left omitted),
- * applied to list indices rather than pixel positions.
- */
+/** Rank change per item, `oldRank - newRank` (positive = climbed, negative = fell); same arithmetic as `computeFlipOffsets`, applied to indices rather than pixel positions. */
 export function computeRankDeltas(
   previousRanks: ReadonlyMap<string, number>,
   nextRanks: ReadonlyMap<string, number>,

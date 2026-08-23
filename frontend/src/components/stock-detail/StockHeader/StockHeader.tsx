@@ -3,12 +3,7 @@ import type { StockHeaderProps } from './StockHeader.props'
 import { CompanyIcon } from '../../shared/CompanyIcon/CompanyIcon'
 import './StockHeader.css'
 
-/**
- * Static per-stock detail page header: company icon, name, sector and
- * ticker. Purely presentational — no data-fetching of its own, receives
- * everything it needs via props. Memoised so a parent re-render with the
- * same identity props costs nothing.
- */
+/** Static per-stock header (icon, name, sector, ticker); purely presentational. Memoised. */
 function StockHeaderComponent({ ticker, name, sector }: StockHeaderProps): JSX.Element {
   return (
     <div className="stock-header">

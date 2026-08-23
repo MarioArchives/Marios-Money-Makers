@@ -6,14 +6,9 @@ import './FxRateNote.css'
 export const FX_UNAVAILABLE_MESSAGE = 'GBP rate unavailable'
 
 /**
- * One-line disclosure of the rate behind every "≈ £…" figure on the page:
- * "1 USD = 0.7339 GBP · ECB, 2026-08-20". Renders nothing while the rate
- * is still loading, and a muted "unavailable" note if it failed — the
- * GBP figures themselves disappear in that case, so the note is the only
- * signal.
- *
- * Memoised: it re-renders only when the shared rate context changes, not
- * when a parent page re-renders on its 20 s poll.
+ * One-line disclosure of the FX rate behind every "≈ £…" figure, e.g.
+ * "1 USD = 0.7339 GBP · ECB, 2026-08-20". Renders nothing while loading.
+ * Memoised: re-renders only on the shared rate context, not the page's poll.
  */
 function FxRateNoteComponent(_props: FxRateNoteProps): JSX.Element | null {
   void _props

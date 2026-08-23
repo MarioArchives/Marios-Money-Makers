@@ -92,11 +92,7 @@ describe('LeaderboardPage', () => {
     expect(screen.queryByTestId('stock-table')).not.toBeInTheDocument()
   })
 
-  /**
-   * v3 error UX (replaces the pre-v3 "renders a page-level error banner"
-   * assertion): the backend being unreachable produces ONE calm message,
-   * and the last successfully fetched board stays on screen behind it.
-   */
+  /** v3 error UX: the backend being unreachable produces ONE calm message, and the last successfully fetched board stays on screen behind it. */
   it('shows a single calm communication-loss message when the query errors', () => {
     mockedUseStocksQuery.mockReturnValue(
       queryResult({ isError: true, error: new Error('network down') }),

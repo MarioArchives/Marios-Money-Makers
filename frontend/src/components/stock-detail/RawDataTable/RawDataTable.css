@@ -31,7 +31,6 @@
   text-overflow: ellipsis;
 }
 
-/* Tier switch: same pill treatment as the page's range selector. */
 .raw-data-table__tiers {
   display: inline-flex;
   gap: 2px;
@@ -81,8 +80,6 @@
   color: var(--color-text-faint);
 }
 
-/* The list can run long; it scrolls inside the card rather than pushing
-   the page. */
 .raw-data-table__scroll {
   max-height: 20rem;
   overflow: auto;
@@ -112,8 +109,6 @@
   border-bottom: 1px solid var(--color-border);
 }
 
-/* Unit suffix in each column header ("Price (USD)"): same small caps as
-   the label, but quieter and not bold so the label still leads. */
 .raw-data-table__unit {
   font-weight: 400;
   color: var(--color-text-faint);

@@ -1,9 +1,5 @@
-/* The header's bottom border, as a countdown: a faint track with the
-   full-strength line on top, scaled from the left by the fraction of the
-   poll interval still to run. Positioned by the header (absolute, bottom
-   edge). The colour comes from the header's `--countdown-color` so it can
-   flip with the bar (brass on the pastel bar; white once the bar itself is
-   brass); brass is the fallback when rendered outside the header. */
+/* Colour comes from the header's `--countdown-color`, falling back to brass
+   when rendered outside the header. Positioned absolute at the header's bottom edge. */
 .poll-countdown {
   --poll-countdown-color: var(--countdown-color, var(--color-accent));
   position: absolute;

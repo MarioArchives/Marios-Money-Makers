@@ -20,16 +20,7 @@ function isPolledStockQuery(query: Query): boolean {
   return head === 'stocks' || head === 'stock'
 }
 
-/**
- * Countdown to the next data poll. Every polled stock query refetches on
- * the same wall-clock tick (`alignedPollInterval` in api/queries), so the
- * countdown is simply the time to that shared tick — one cycle, draining
- * 1 -> 0 and snapping back to 1 on the tick — regardless of how many
- * queries are active or when each of them happened to mount. A query that
- * mounts (or refetches) mid-cycle — e.g. switching the stock page's range —
- * neither resets nor dents the bar. No provider (unit tests) or no polled
- * data yet -> `remaining: 1`, i.e. a full, static bar.
- */
+/** Countdown to the next data poll: the shared aligned tick (`alignedPollInterval`), draining 1 -> 0 and snapping back on tick regardless of which/how many queries are active. No provider or no polled data yet -> `remaining: 1`. */
 export function usePollCountdown(intervalMs: number = POLL_INTERVAL_MS): PollCountdown {
   const client = useContext(QueryClientContext)
   const [countdown, setCountdown] = useState<PollCountdown>({
@@ -60,13 +51,9 @@ export function usePollCountdown(intervalMs: number = POLL_INTERVAL_MS): PollCou
       })
     }
 
-    // Cache events can fire synchronously *inside another component's
-    // render*: React Query builds a new query observer during `useQuery`'s
-    // render path and emits `added` (first visit to a range/tier, a new
-    // ticker). Calling setState from that callback would be a
-    // cross-component update during render (React warns and it is a
-    // wasted render). Defer to a microtask -- still before paint, and
-    // coalesces a burst of events into one evaluation.
+    // Cache events can fire synchronously mid-render (React Query emits
+    // `added` while building a new observer); defer to a microtask to avoid
+    // a cross-component setState-during-render warning and coalesce bursts.
     let disposed = false
     let scheduled = false
     const onCacheEvent = (): void => {

@@ -1,15 +1,4 @@
-"""FastAPI application entrypoint.
-
-Creates the `FastAPI` app, configures CORS from
-`app.config.ALLOWED_ORIGINS` (GET-only, per the plan's error-handling
-section), and wires up the stocks router and the market router (the
-Alpaca market clock, `GET /api/market/clock`). The lifespan hook initialises
-the SQLite store (and invalidates stale bar fetch stamps if
-``ALPACA_BARS_ADJUSTMENT`` changed since the DB was last used) and, unless `app.config.BACKFILL_ENABLED` is off, runs
-the :mod:`app.backfill` sweep as a background task for the life of the
-process (cancelled on shutdown). This module is plumbing (app
-construction + middleware configuration), not business logic.
-"""
+"""FastAPI application entrypoint: app construction and middleware wiring."""
 
 from __future__ import annotations
 
@@ -30,9 +19,7 @@ from app.routers.stocks import router as stocks_router
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create the SQLite tables, then run the backfill sweep until shutdown.
 
-    ``config.BACKFILL_ENABLED`` is read at call time (module attribute,
-    not imported) so tests can monkeypatch it off and use ``TestClient``
-    lifespans without starting a real sweep.
+    ``config.BACKFILL_ENABLED`` is read at call time so tests can monkeypatch it.
     """
     storage.init_db()
     storage.ensure_bars_adjustment(config.ALPACA_BARS_ADJUSTMENT)

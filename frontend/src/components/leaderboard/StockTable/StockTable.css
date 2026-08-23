@@ -6,8 +6,6 @@
   transition: opacity var(--motion-base) var(--ease);
 }
 
-/* Column labels sit on the paper, not on a header bar — the rows are the
-   only raised objects on the page. */
 .stock-table__head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(6.5rem, auto);
@@ -26,17 +24,14 @@
   gap: var(--space-2);
 }
 
-/* Per-row slot: the FLIP reorder animation moves this wrapper (the row
-   itself keeps its own hover transform). `position: relative` so a moving
-   row can be stacked over the static ones it passes. */
+/* position: relative so a moving row can stack (z-index) over static ones it passes. */
 .stock-table__slot {
   position: relative;
   transition: transform var(--motion-reorder) var(--ease-spring);
   will-change: transform;
 }
 
-/* While a row is in flight it passes *over* rows that stayed put; a riser
-   goes over a faller where the two cross. */
+/* z-index order: a riser must stack over a faller where the two cross. */
 .stock-table__slot.is-moved-down {
   z-index: 1;
 }
@@ -45,9 +40,7 @@
   z-index: 2;
 }
 
-/* Inner row: colour/shape cues ride on the pill, not the slot, so they
-   never fight the slide transform. Slower than the row's own hover
-   transition, so the lift/settle reads as part of the move. */
+/* 600ms, slower than the row's own hover transition, so lift/settle reads as part of the move. */
 .stock-table__slot .stock-row {
   transition:
     background 600ms var(--ease),
@@ -57,7 +50,6 @@
     opacity var(--motion-base) var(--ease);
 }
 
-/* A row that rose: green tint, a touch larger and lifted on a shadow. */
 .stock-table__slot.is-moved-up .stock-row {
   background: color-mix(in srgb, var(--color-up) 11%, var(--color-surface));
   border-color: color-mix(in srgb, var(--color-up) 55%, var(--color-border));
@@ -65,8 +57,6 @@
   transform: scale(1.012);
 }
 
-/* A row that fell: red tint, a touch smaller and flatter, as if it slipped
-   back a layer. */
 .stock-table__slot.is-moved-down .stock-row {
   background: color-mix(in srgb, var(--color-down) 9%, var(--color-surface));
   border-color: color-mix(in srgb, var(--color-down) 50%, var(--color-border));
@@ -74,7 +64,7 @@
   transform: scale(0.988);
 }
 
-/* Tints come on fast; they fade out on the slower base transition above. */
+/* Overrides the base transition above: tints come on fast, fade out slow. */
 .stock-table__slot.is-moved .stock-row {
   transition:
     background var(--motion-fast) var(--ease),
@@ -85,7 +75,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* Instant reorder: no slide, no lift/sink. The tint still flags the row. */
+  /* Tint still flags the row even with no slide/lift. */
   .stock-table__slot {
     transition: none;
   }
@@ -97,15 +87,13 @@
   }
 }
 
-/* Sort direction hint on the column the board is ranked by. */
 .stock-table__sort-mark {
   font-size: 0.6em;
   vertical-align: middle;
   color: var(--color-text-faint);
 }
 
-/* Whole-board degradation: the same fade a single stale row gets, applied
-   once at the top so individual rows don't compound it. */
+/* Applied once at the top so individual stale rows don't compound the fade. */
 .stock-table--degraded {
   opacity: var(--stale-opacity);
 }

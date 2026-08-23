@@ -1,15 +1,8 @@
-/* =========================================================================
-   Mario's Money Makers — design tokens
-   -------------------------------------------------------------------------
-   Direction: "the official list", re-papered. British institutional print
-   (daily official list, Bank of England stationery) on warm pastel-yellow
-   ledger stock: navy ink, brass hairlines, Gill Sans for anything that
-   speaks, monospace for anything that is a number. Up/down are racing
-   green and claret, not traffic-light RGB.
-   ========================================================================= */
+/* Mario's Money Makers — design tokens. Direction: "the official list", re-papered
+   (British institutional print on pastel-yellow ledger stock: navy ink, brass
+   hairlines, Gill Sans display, mono for numbers; racing green/claret, not RGB). */
 
 :root {
-  /* --- Palette ---------------------------------------------------------- */
   --ink: #101f2e; /* navy-black, the primary ink */
   --navy: #16324f; /* LSE navy — header bar, spine of the brand */
   --navy-deep: #0e2137;
@@ -21,7 +14,6 @@
   --racing-green: #12664a; /* up */
   --claret: #a11b33; /* down */
 
-  /* --- Semantic colour -------------------------------------------------- */
   --color-bg: var(--paper);
   --color-surface: var(--card);
   --color-surface-sunken: #f6eecf;
@@ -41,7 +33,6 @@
   --color-chart-grid: #eee4c2;
   --color-chart-closed: var(--color-surface-sunken);
 
-  /* --- Type ------------------------------------------------------------- */
   /* Display: Gill Sans — the British humanist sans (Penguin, LNER, the BBC).
      Used with restraint and letterspaced, never for body copy. */
   --font-display:
@@ -69,7 +60,6 @@
   --tracking-wide: 0.08em;
   --tracking-wider: 0.18em;
 
-  /* --- Space (4px rhythm) ----------------------------------------------- */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -78,7 +68,6 @@
   --space-6: 2rem;
   --space-7: 3rem;
 
-  /* --- Form ------------------------------------------------------------- */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -88,7 +77,6 @@
   --shadow-lift:
     0 2px 2px rgb(16 31 46 / 5%), 0 14px 28px -18px rgb(16 31 46 / 30%);
 
-  /* --- Degradation ------------------------------------------------------ */
   /* One dial for "this is the last edition, not the live one". Every stale
      surface in the app leans on these two tokens and nothing else. */
   --stale-opacity: 0.52;
@@ -160,9 +148,8 @@ h3 {
   border-radius: var(--radius-sm);
 }
 
-/* --- Primitives ---------------------------------------------------------
-   Shared card + eyebrow used by the dashboard and detail pages, kept here
-   rather than triplicated across component stylesheets. */
+/* Primitives: shared card + eyebrow used by the dashboard and detail pages,
+   kept here rather than triplicated across component stylesheets. */
 
 .card {
   background: var(--color-surface);

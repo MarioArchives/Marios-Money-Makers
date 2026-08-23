@@ -4,10 +4,7 @@ import { LeaderboardPage } from './pages/LeaderboardPage/LeaderboardPage'
 import { StockDetailPage } from './pages/StockDetailPage/StockDetailPage'
 import { DashboardPage } from './pages/DashboardPage/DashboardPage'
 
-/**
- * App-wide route table: `AppShell` is the layout route (nav + `<Outlet/>`)
- * wrapping the three pages described in the plan.
- */
+/** App-wide route table: `AppShell` is the layout route (nav + `<Outlet/>`) wrapping the three pages. */
 export const router = createBrowserRouter([
   {
     element: <AppShell />,

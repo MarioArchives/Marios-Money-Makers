@@ -7,16 +7,9 @@ import type { HistoryResponse, StockSummary } from '../../../api/types'
 import { FxRateContext } from '../../../providers/FxRateProvider/FxRateProvider'
 
 /**
- * `queries.ts` is mocked below. Real `useQuery` re-renders only the
- * component that called it when ITS OWN cache entry changes (an internal
- * subscription), independently of any parent re-render. To test that
- * PriceTicker only reacts to `useStockDetailQuery` (never
- * `useStockHistoryQuery`), the mocked hooks are backed by tiny reactive
- * stores that subscribe/unsubscribe via `useEffect`, so changing one
- * store's value only re-renders components that actually called the
- * corresponding hook — mirroring real react-query subscription semantics
- * far more faithfully than a static `mockReturnValue` + forced rerender
- * would (which can't distinguish "which hook" a component depends on).
+ * Mocks below back each hook with its own reactive store (subscribe via
+ * useEffect) so changing one store re-renders only components that called
+ * that hook — a static mockReturnValue can't isolate "which hook" like this.
  */
 interface ReactiveStore<T> {
   set(next: T): void
@@ -184,10 +177,7 @@ describe('PriceTicker re-render isolation', () => {
   })
 })
 
-/**
- * v3 error UX: a stale/errored price greys out and keeps its last known
- * value; the backend's error string is never rendered.
- */
+/** v3 error UX: greys out, keeps the last known value, never renders the error string. */
 describe('PriceTicker degraded state', () => {
   it('is not marked stale while the figure is fresh', () => {
     render(<PriceTicker ticker="AZN.L" />)

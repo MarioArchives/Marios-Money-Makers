@@ -1,18 +1,4 @@
-/**
- * Formatting helpers for the NYSE / Nasdaq market clock shown by
- * `MarketStatusBanner`.
- *
- * The clock itself — whether the market is open, and the instants of the
- * next open/close — comes from the backend (`GET /api/market/clock`,
- * sourced from Alpaca's `/v2/clock`); this module keeps no session times or
- * holiday calendar of its own. It only turns instants and durations into
- * text: a New York wall-clock reading, a viewer-local reading, and the two
- * countdown formats. All wall-clock arithmetic goes through
- * `Intl.DateTimeFormat` with the `America/New_York` zone, so DST is handled
- * by the platform's tz data and no date library is needed. Everything here
- * is pure (takes an instant, returns a value) so it can be unit-tested with
- * fixed instants.
- */
+/** Formatting helpers for the NYSE/Nasdaq market clock. The open/close instants come from the backend; this module only turns them into text via `Intl.DateTimeFormat` (`America/New_York`), so DST needs no date library. */
 
 export const MARKET_TIME_ZONE = 'America/New_York'
 
@@ -65,13 +51,7 @@ export function toMarketLocal(instant: Date): LocalDateTime {
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
-/**
- * A remaining duration for the countdown: `"4h 17m 03s"` inside a day,
- * `"2d 4h 17m"` beyond it (seconds would just be noise at that range), and
- * `"17m 03s"` under an hour. Rounds up to whole seconds so the display
- * reaches `0m 00s` exactly as the boundary passes, never a second early;
- * negative input clamps to zero.
- */
+/** Remaining duration: `"4h 17m 03s"` inside a day, `"2d 4h 17m"` beyond it, `"17m 03s"` under an hour. Rounds up to whole seconds; negative input clamps to zero. */
 export function formatCountdown(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))
   const days = Math.floor(total / 86_400)
@@ -88,11 +68,7 @@ export function formatCountdown(ms: number): string {
   return `${minutes}m ${pad2(seconds)}s`
 }
 
-/**
- * Coarser, spoken form for an accessible label — no seconds, so the text
- * only changes once a minute: `"4 hours 17 minutes"`, `"2 days 4 hours"`,
- * `"under a minute"`.
- */
+/** Coarser, spoken form for an accessible label — no seconds, so it only changes once a minute: `"4 hours 17 minutes"`, `"under a minute"`. */
 export function describeCountdown(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))
   const days = Math.floor(total / 86_400)
@@ -133,10 +109,7 @@ export function formatViewerClock(instant: Date): string {
   return viewerFormatter.format(instant).replace(',', '')
 }
 
-/**
- * True iff `nextClose`'s New York wall-clock time lands before the regular
- * 16:00 close — i.e. the session it belongs to is a holiday early close.
- */
+/** True iff `nextClose`'s NY wall-clock time lands before the regular 16:00 close (i.e. the session is a holiday early close). */
 export function isEarlyClose(nextClose: Date): boolean {
   const local = toMarketLocal(nextClose)
   return local.hour < REGULAR_CLOSE.hour ||

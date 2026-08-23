@@ -1,13 +1,6 @@
-"""Tests for `app.alpaca_client` — the Alpaca Market Data API boundary.
-
-No network: an `httpx.MockTransport` is injected through the module's
-`_transport` test seam, so the full request/response path (URL, params,
-headers, pagination, error handling) is exercised against canned payloads
-shaped exactly like real Alpaca responses.
-
-Credentials/base-url/feed are monkeypatched on `app.config` (which the
-client reads at call time).
-"""
+"""Tests for `app.alpaca_client`. No network: an `httpx.MockTransport` is
+injected via the module's `_transport` test seam. Credentials/base-url/
+feed are monkeypatched on `app.config`."""
 
 from __future__ import annotations
 
@@ -586,9 +579,8 @@ class TestFetchBarsValidation:
 
 class TestFetchSummariesValidation:
     """`fetch_summaries` never raises: a malformed body is an all-error
-    batch, a malformed snapshot entry is an error entry for that symbol
-    only, and a malformed `minuteBar` on an otherwise good snapshot keeps
-    the summary but is not persisted."""
+    batch, a malformed entry is a per-symbol error, and a malformed
+    `minuteBar` keeps the summary but isn't persisted."""
 
     def _assert_error_entry(self, summary) -> None:
         assert summary.is_stale is True
@@ -696,9 +688,6 @@ class TestFetchSummariesValidation:
         assert minute_bars == {}
 
 
-# --- market clock (trading API) ----------------------------------------------
-
-
 def _clock_body(**overrides) -> dict:
     """Alpaca's documented `GET /v2/clock` body (New York offsets, as served)."""
     body = {
@@ -716,10 +705,9 @@ def _clock_handler(body) -> callable:
 
 
 class TestFetchClock:
-    """`fetch_clock` -> Alpaca's legacy market clock, `GET /v2/clock` on the
-    *trading* host (`ALPACA_TRADING_BASE_URL`), never the data host. Same
-    raising contract as `fetch_bars`: request failure or a malformed body is
-    an `AlpacaError`; a malformed body is never mistaken for rate limiting."""
+    """`fetch_clock` hits Alpaca's legacy `GET /v2/clock` on the *trading*
+    host, never the data host. Same raising contract as `fetch_bars`
+    (failure/malformed body -> `AlpacaError`, never mistaken for rate limiting)."""
 
     def test_request_shape_and_normalized_result(self, monkeypatch):
         seen = _install(monkeypatch, _clock_handler(_clock_body()))

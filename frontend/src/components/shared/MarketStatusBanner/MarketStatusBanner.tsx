@@ -14,32 +14,9 @@ import './MarketStatusBanner.css'
 export const MARKET_STATUS_TICK_MS = 1000
 
 /**
- * One line above the leaderboard saying whether the US market is open and
- * how long until that changes: "Market closed · opens in 4h 17m 03s", or
- * "Market open · closes in 2h 05m 10s". Outside US hours the IEX feed
- * visibly stops moving; this is the calm explanation, a sibling of
- * `ConnectionBanner` rather than a warning.
- *
- * Data comes from the backend clock (`useMarketClockQuery`, polled on the
- * shared 20s tick); the countdown itself ticks locally once a second
- * against the fetched `next_open`/`next_close` (the interval is cleared on
- * unmount). While the query has no data yet — first load, or an error with
- * nothing cached — the banner renders nothing rather than guessing. A
- * `is_stale` clock is still shown (the backend's best last-known reading),
- * just marked with a quiet `is-stale` class.
- *
- * When the local countdown reaches zero, the backend clock we are showing
- * is known to be out of date (the boundary it was counting down to has
- * arrived); the banner asks the query to refetch exactly once per boundary
- * and keeps showing the stale state clamped at `0m 00s` until the new
- * clock arrives.
- *
- * Accessibility: `role="status"` so it is findable as the page's status
- * line, but with `aria-live="off"` — a region that changes every second
- * would have a screen reader talking over everything else. The accessible
- * name (`aria-label`) carries the same state with the countdown rounded to
- * minutes, so a reader landing on it hears "Market closed, opens in 4 hours
- * 17 minutes" rather than the ticking seconds.
+ * Countdown banner above the leaderboard ("Market closed · opens in 4h
+ * 17m 03s"); renders nothing until the clock query has data. Refetches
+ * once per boundary crossing; see ARCHITECTURE.md for the aria-live rationale.
  */
 export function MarketStatusBanner(_props: MarketStatusBannerProps): JSX.Element | null {
   void _props

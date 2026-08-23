@@ -1,19 +1,6 @@
 import type { HistoryPoint } from '../api/types'
 
-/**
- * Intraday (1d) chart series with market-closed blocks.
- *
- * The chart keeps a categorical x-axis (every bar gets the same width, so
- * trading hours keep all the space). The client no longer carries any
- * session calendar — the market clock lives in the backend
- * (`GET /api/market/clock`) and only describes *now*, not history — so the
- * rule here is purely data-driven: every hole of at least `MIN_HOLE_MS`
- * between consecutive bars gets a fixed-width block of placeholder columns,
- * greyed out with the "no data" message. Overnights, weekends and holidays
- * all show up as exactly such holes; the known tradeoff is that a long
- * in-session outage is marked the same way (with no calendar the client
- * cannot tell the two apart).
- */
+/** Intraday (1d) chart series with market-closed blocks: purely data-driven (no session calendar client-side) — any hole >= `MIN_HOLE_MS` between bars gets a greyed placeholder block. Tradeoff: an in-session outage looks the same as a closed market. */
 
 /** A plotted row: a real bar, or a null-close placeholder column. */
 export interface IntradayPlotPoint {
@@ -41,12 +28,7 @@ export const GAP_BLOCK_FRACTION = 0.08
 /** A block is never narrower than this many columns. */
 export const GAP_BLOCK_MIN_SLOTS = 4
 
-/**
- * Only a hole at least this long between consecutive bars gets a block —
- * shorter gaps are the normal cadence of sparse pre-/after-hours bars, and
- * data that runs continuously through the night (the mock server) has no
- * hole to mark at all.
- */
+/** Only a hole at least this long gets a block; shorter gaps are the normal cadence of sparse pre-/after-hours bars, and continuous overnight data (mock server) has no hole at all. */
 export const MIN_HOLE_MS = 30 * 60_000
 
 const GAP_KEY_PREFIX = 'gap:'

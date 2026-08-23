@@ -175,11 +175,7 @@ describe('StockDetailPage', () => {
   })
 })
 
-/**
- * v3 error UX: when the backend is unreachable the detail page keeps every
- * surface mounted with its last figures and greys them out behind ONE calm
- * page-level message — no spinner, no torn-down chart, no raw error text.
- */
+/** v3 error UX: when the backend is unreachable, every surface stays mounted with its last figures, greyed behind ONE calm page-level message. */
 describe('StockDetailPage when the backend is unreachable', () => {
   beforeEach(() => {
     mockedUseStockDetailQuery.mockReset()

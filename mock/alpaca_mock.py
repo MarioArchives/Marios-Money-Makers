@@ -1,49 +1,7 @@
 #!/usr/bin/env python3
 """Mock Alpaca Market Data server for offline development.
 
-Serves a deterministic sinusoidal price for every symbol:
-
-    price(t) = OFFSET + AMPLITUDE * sin(2*pi * t / PERIOD + phase(symbol))
-
-with defaults OFFSET=100, AMPLITUDE=20, PERIOD=20 minutes -- i.e. every
-stock oscillates between 80 and 120 on a 20-minute cycle. Each of the app's
-20 symbols gets a different phase (spread evenly round the circle) so the
-leaderboard keeps re-ranking; pass --no-phase-shift to make them identical.
-
-Implements exactly the three endpoints ``backend/app/alpaca_client.py`` calls,
-with Alpaca's response shapes:
-
-    GET /v2/stocks/snapshots?symbols=A,B,...&feed=iex
-        -> {"AAPL": {"latestTrade": {...}, "minuteBar": {...},
-                     "dailyBar": {...}, "prevDailyBar": {...}}, ...}
-
-    GET /v2/stocks/{symbol}/bars?timeframe=1Min|1Hour|1Day&start=...&limit=N&page_token=T
-        -> {"symbol": "...", "bars": [{"t","o","h","l","c","v","vw","n"}, ...],
-            "next_page_token": "..." | null}
-
-    GET /v2/clock  (Alpaca's legacy trading clock)
-        -> {"timestamp": "...", "is_open": bool,
-            "next_open": "...", "next_close": "..."}
-
-Minute/hour bars are generated 24/7 (the mock market never closes) unless
-``--sessions-only`` is passed, which emits them only inside the 13:30Z-20:00Z
-session (every day, weekends included) so the intraday chart has a real
-market-closed hole to grey out; daily bars are one per weekday stamped at
-04:00Z like Alpaca's. The ``/v2/clock`` session, by contrast, always runs
-13:30Z-20:00Z every day (weekends included) in BOTH the default and
-``--sessions-only`` modes, independent of the bars flag, so the dev banner
-can show both an open and a closed state. Auth headers and
-``feed`` / ``adjustment`` are accepted and ignored. Stdlib only.
-
-The backend needs to be pointed at this mock for BOTH
-``ALPACA_DATA_BASE_URL`` (snapshots/bars) and ``ALPACA_TRADING_BASE_URL``
-(clock) -- both point at the same host:port below.
-
-    python3 mock/alpaca_mock.py --port 8500
-    ALPACA_DATA_BASE_URL=http://localhost:8500 \\
-    ALPACA_TRADING_BASE_URL=http://localhost:8500 \\
-    uv run uvicorn app.main:app --port 8000
-"""
+Sinusoidal price model, stdlib only. See README.md ("Offline, against the mock")."""
 
 from __future__ import annotations
 
@@ -80,8 +38,6 @@ KNOWN_SYMBOLS = [
     "JNJ",
     "NFLX",
 ]
-
-# ── Price model (set from CLI in main()) ───────────────────────────────────────
 
 OFFSET = 100.0
 AMPLITUDE = 20.0
@@ -138,14 +94,9 @@ def bar(
     open_at: datetime | None = None,
     close_at: datetime | None = None,
 ) -> dict:
-    """One OHLCV bar over [start, end). h/l are exact for the sine.
-
-    The extrema are computed analytically -- the endpoints plus any peak
-    (sin = +1) or trough (sin = -1) that falls inside the bar -- so a bar is
-    O(1) regardless of how long it is relative to the period. (Sampling the
-    interval instead made a 1Day request take ~5 s with a multi-day period,
-    which tripped the backend's Alpaca timeout.)
-    """
+    """One OHLCV bar over [start, end); h/l computed analytically, not by
+    sampling -- sampling made a 1Day request take ~5s with a multi-day
+    period and tripped the backend's Alpaca timeout."""
     o = price_at(symbol, open_at or start)
     c = price_at(symbol, close_at or end)
     h, lo = _extrema(symbol, start, end)
@@ -162,13 +113,9 @@ def bar(
 
 
 def _extrema(symbol: str, start: datetime, end: datetime) -> tuple[float, float]:
-    """(high, low) of the price curve over [start, end], exact for the sine.
-
-    The phase argument is ``x = 2*pi*t/PERIOD + phase``; the curve peaks at
-    ``x = pi/2 + 2*pi*k`` and troughs at ``x = 3*pi/2 + 2*pi*k``. Check both
-    endpoints and the first peak/trough at or after ``start``: if it lands
-    before ``end`` the extreme is reached inside the bar.
-    """
+    """(high, low) of the price curve over [start, end], exact for the sine:
+    checks both endpoints plus the first peak/trough at or after `start`
+    that lands before `end`."""
     x0 = 2 * math.pi * start.timestamp() / PERIOD_SECONDS + phase_for(symbol)
     x1 = 2 * math.pi * end.timestamp() / PERIOD_SECONDS + phase_for(symbol)
     lo, hi = sorted((price_at(symbol, start), price_at(symbol, end)))
@@ -205,8 +152,6 @@ def floor_to(t: datetime, seconds: int) -> datetime:
     epoch = int(t.timestamp())
     return datetime.fromtimestamp(epoch - epoch % seconds, tz=timezone.utc)
 
-
-# ── Endpoint logic ─────────────────────────────────────────────────────────────
 
 
 def snapshots(symbols: list[str], now: datetime) -> dict:
@@ -290,13 +235,8 @@ def bars(
 
 
 def clock(now: datetime) -> dict:
-    """Alpaca's legacy trading-clock body.
-
-    The clock session is always 13:30Z-20:00Z every day (weekends included),
-    regardless of --sessions-only -- unlike bars, which only observe that
-    window when --sessions-only is passed. This keeps the dev banner able to
-    show both an open and a closed state in either mode.
-    """
+    """Alpaca's legacy trading-clock body. Session is always 13:30Z-20:00Z
+    every day, independent of --sessions-only (unlike bars)."""
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     open_today = today.replace(hour=SESSION_OPEN[0], minute=SESSION_OPEN[1])
     close_today = today.replace(hour=SESSION_CLOSE[0], minute=SESSION_CLOSE[1])
@@ -310,8 +250,6 @@ def clock(now: datetime) -> dict:
         "next_close": iso(next_close),
     }
 
-
-# ── HTTP plumbing ──────────────────────────────────────────────────────────────
 
 BARS_PATH = re.compile(r"^/v2/stocks/([^/]+)/bars$")
 

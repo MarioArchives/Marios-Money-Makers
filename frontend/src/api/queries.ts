@@ -11,20 +11,11 @@ import {
   type StoredTier,
 } from './types'
 
-/**
- * Polling interval (ms) used for every stock-related query, per plan: 20s.
- */
+/** Polling interval (ms) used for every stock-related query, per plan: 20s. */
 export const POLL_INTERVAL_MS = 20000
 
 /**
- * Milliseconds from `now` until the next wall-clock multiple of
- * `intervalMs` — always in (0, intervalMs]. Every polled stock query
- * schedules its refetch on this *shared* tick rather than "N ms after my
- * own last fetch", so queries that mount at different moments (switching
- * 1d -> 30d -> all on the stock page, a cached range remounting, the
- * detail/chart/table trio) all refresh together. That gives the header
- * countdown (`usePollCountdown`) exactly one cycle to show instead of a
- * ragged set of per-query timers jumping it to partial fills.
+ * Ms until the next wall-clock multiple of `intervalMs`, in (0, intervalMs]; queries share this tick (not "N ms after my own last fetch") so differently-mounted queries refresh together.
  */
 export function msUntilNextPoll(
   now: number = Date.now(),
@@ -33,19 +24,12 @@ export function msUntilNextPoll(
   return intervalMs - (now % intervalMs)
 }
 
-/**
- * `refetchInterval` for the polled stock queries. React Query re-evaluates
- * a function interval after every fetch (and restarts its timer from that
- * moment), so each refetch lands on the next shared tick.
- */
+/** `refetchInterval` for the polled stock queries: React Query re-evaluates this after every fetch, landing each refetch on the next shared tick. */
 export function alignedPollInterval(): number {
   return msUntilNextPoll()
 }
 
-/**
- * staleTime (ms) used for every stock-related query. Kept just under
- * POLL_INTERVAL_MS so a scheduled refetch is always considered "due".
- */
+/** staleTime (ms): kept just under POLL_INTERVAL_MS so a scheduled refetch is always considered "due". */
 export const STALE_TIME_MS = 18000
 
 /** Query key for the leaderboard (`GET /api/stocks`). */
@@ -56,11 +40,7 @@ export function stockKey(ticker: string): readonly ['stock', string] {
   return ['stock', ticker] as const
 }
 
-/**
- * Ticker- and range-scoped query key for a single stock's history
- * (`GET /api/stocks/{ticker}/history?range=...`). Each range is its own
- * cache entry so switching 1d -> 30d never overwrites the intraday series.
- */
+/** Ticker- and range-scoped query key for a single stock's history; each range is its own cache entry so switching 1d -> 30d never overwrites the intraday series. */
 export function historyKey(
   ticker: string,
   range: HistoryRange = DEFAULT_HISTORY_RANGE,
@@ -81,15 +61,7 @@ export function useStocksQuery(): UseQueryResult<StocksResponse, Error> {
 }
 
 /**
- * Polls `GET /api/stocks/{ticker}` every POLL_INTERVAL_MS for a single
- * stock's price/change, independently of that ticker's history query.
- *
- * `select` narrows what the caller subscribes to. React Query applies
- * structural sharing to the selected value, so a component that only
- * needs e.g. `name`/`sector` keeps a stable reference across polls and
- * does not re-render on every price tick (pass a module-level function so
- * the selector itself is stable). Observers with and without `select`
- * share the same cache entry — no extra requests.
+ * Polls `GET /api/stocks/{ticker}` for a single stock's price/change. `select` narrows the subscription; pass a module-level function so React Query's structural sharing keeps a stable reference and skips re-renders.
  */
 export function useStockDetailQuery(ticker: string): UseQueryResult<StockSummary, Error>
 export function useStockDetailQuery<T>(
@@ -109,12 +81,7 @@ export function useStockDetailQuery<T = StockSummary>(
   })
 }
 
-/**
- * Polls `GET /api/stocks/{ticker}/history?range=...` every POLL_INTERVAL_MS
- * for a single stock's chart points at the requested range (`1d` minute
- * bars, `30d` hourly, `all` every stored daily bar), independently of that
- * ticker's detail query.
- */
+/** Polls a single stock's chart points at the requested range (`1d` minute bars, `30d` hourly, `all` every stored daily bar), independently of the detail query. */
 export function useStockHistoryQuery(
   ticker: string,
   range: HistoryRange = DEFAULT_HISTORY_RANGE,
@@ -127,11 +94,7 @@ export function useStockHistoryQuery(
   })
 }
 
-/**
- * Ticker- and tier-scoped query key for the raw SQLite inspection endpoint
- * (`GET /api/stocks/{ticker}/stored?tier=...`). Nested under the stock key,
- * separate from `history` so the two never share a cache entry.
- */
+/** Ticker- and tier-scoped query key for the raw SQLite inspection endpoint; nested under the stock key, separate from `history` so the two never share a cache entry. */
 export function storedKey(
   ticker: string,
   tier: StoredTier,
@@ -139,11 +102,7 @@ export function storedKey(
   return ['stock', ticker, 'stored', tier] as const
 }
 
-/**
- * Polls `GET /api/stocks/{ticker}/stored?tier=...` every POLL_INTERVAL_MS:
- * everything the backend's SQLite store holds for one ticker in one tier
- * (every row, every column). Backs the raw-data table.
- */
+/** Polls everything the backend's SQLite store holds for one ticker in one tier (every row, every column); backs the raw-data table. */
 export function useStoredDataQuery(
   ticker: string,
   tier: StoredTier,
@@ -159,14 +118,7 @@ export function useStoredDataQuery(
 /** Query key for the backend market clock (`GET /api/market/clock`). */
 export const marketClockKey = ['market', 'clock'] as const
 
-/**
- * Polls `GET /api/market/clock` on the shared aligned tick: whether the US
- * market is open right now, and the instants of the next open/close, as
- * reported by the backend (sourced from Alpaca's `/v2/clock`). Keyed under
- * `market` rather than `stocks`/`stock`, so `usePollCountdown` — which only
- * tracks stock queries for the header's "next refresh" clock — ignores it;
- * that is intended, this query has its own consumer (`MarketStatusBanner`).
- */
+/** Whether the US market is open and the next open/close instants. Keyed under `market`, not `stocks`/`stock`, so `usePollCountdown` (header countdown) ignores it; its consumer is `MarketStatusBanner`. */
 export function useMarketClockQuery(): UseQueryResult<MarketClockResponse, Error> {
   return useQuery({
     queryKey: marketClockKey,

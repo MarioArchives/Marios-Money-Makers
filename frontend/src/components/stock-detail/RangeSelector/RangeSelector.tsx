@@ -11,11 +11,9 @@ export const RANGE_LABELS: Record<HistoryRange, string> = {
 }
 
 /**
- * Segmented control for the stock detail page's history range. Purely
- * presentational and controlled: renders one button per backend range,
- * marks the selected one with `aria-pressed`, and reports clicks through
- * `onChange`. Where the selection lives (URL, state) is the caller's
- * business — this component never touches the router or any query.
+ * Segmented control for the history range: purely presentational and
+ * controlled, reports clicks via `onChange`. Never touches the router or a
+ * query itself — where the selection lives is the caller's business.
  */
 function RangeSelectorComponent({ value, onChange }: RangeSelectorProps): JSX.Element {
   return (

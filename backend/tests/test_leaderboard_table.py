@@ -1,25 +1,6 @@
-"""Tests for the DB-first leaderboard: the `summaries` table, its `fetch_log`
-stamp and the single-flight refresh in
-`app.routers.stocks._get_summaries_batch`.
-
-Single flight is the in-process `asyncio.Lock` alone -- the `fetch_claims`
-cross-process lease was removed, so these tests also pin that no lease row
-or table is created, and that a legacy one left in an old DB file is
-dropped rather than honoured.
-
-Unlike `tests/test_stocks_router.py` (which mocks `fetch_summaries` at the
-router's call site), these tests drive the REAL `app.alpaca_client` over an
-`httpx.MockTransport` that counts every Alpaca request, so "exactly one
-snapshots call" is asserted at the HTTP boundary. `app.storage` is never
-mocked: every test gets its own tmp-path SQLite DB. Router module state
-(`_refresh_locks`, `_backoff`) is reset per test; a "process restart" is
-simulated by resetting it again mid-test while keeping the DB file.
-
-Clocks: `fake_utcnow` drives TTL / freshness arithmetic (`stocks._utcnow`),
-`fake_clock` drives backoff windows (`stocks._monotonic`). Nothing sleeps
-except the deliberate `time.sleep` inside the slow transport used to hold
-a leader "in flight" while a burst of waiters queues behind it.
-"""
+"""Tests for the DB-first leaderboard (`summaries` table + single-flight
+refresh). Drives the REAL `app.alpaca_client` over an `httpx.MockTransport`,
+unlike `test_stocks_router.py`, which mocks `fetch_summaries` directly."""
 
 from __future__ import annotations
 
@@ -73,14 +54,9 @@ class _FakeClock:
 
 
 class _Alpaca:
-    """Counting `httpx.MockTransport` standing in for the Alpaca data API.
-
-    `mode` selects the snapshots answer: ``"ok"`` (every symbol priced,
-    ``price = base + index``), ``"429"`` (rate limited -> all-error
-    batch), ``"500"``. `delay` holds each request for that many seconds
-    (served in a worker thread, so the event loop keeps running and a
-    burst of waiters can pile up behind the leader).
-    """
+    """Counting `httpx.MockTransport` stand-in for the Alpaca data API.
+    `mode` selects the response (`"ok"`, `"429"`, `"500"`); `delay` holds
+    each request in a worker thread so waiters can pile up behind it."""
 
     def __init__(self) -> None:
         self.calls = 0

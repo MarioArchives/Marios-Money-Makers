@@ -1,17 +1,6 @@
-"""Tests for `app.backfill` (startup + periodic sweep) and its lifespan wiring.
-
-Same conventions as `tests/test_stocks_router.py`: a tmp-path SQLite DB
-via a monkeypatched `app.config.DB_PATH`, `app.alpaca_client.fetch_bars`
-mocked at the module attribute (the router and the sweep both call it
-through the `alpaca_client` module object, and `refresh_history` runs it
-in a worker thread, so the patch is visible there too), and a frozen
-wall clock via `app.routers.stocks._utcnow`. `app.backfill._sleep` is the
-module's sleep seam: it is replaced by a recorder so no test ever waits.
-The sweep also refreshes the leaderboard's `summaries` table through the
-real `alpaca_client.fetch_summaries`, so an `httpx.MockTransport` answering
-the snapshots request (no minute bars, so the bar tables stay untouched)
-is installed for every test. No network.
-"""
+"""Tests for `app.backfill` (startup + periodic sweep) and its lifespan
+wiring. `backfill._sleep` is the sleep seam, replaced by a recorder so no
+test ever waits; same tmp-path DB / frozen-clock conventions as `test_stocks_router.py`."""
 
 from __future__ import annotations
 
@@ -61,11 +50,9 @@ class _FakeWallClock:
 
 
 class _SleepRecorder:
-    """`backfill._sleep` stand-in: records requested durations, never waits.
-
-    Optionally raises `asyncio.CancelledError` on the N-th call so
-    `run_forever` tests can stop the loop deterministically.
-    """
+    """`backfill._sleep` stand-in: records requested durations, never
+    waits. Optionally raises `asyncio.CancelledError` on the N-th call so
+    `run_forever` tests can stop deterministically."""
 
     def __init__(self, cancel_after: int | None = None) -> None:
         self.calls: list[float] = []
@@ -408,10 +395,9 @@ class TestSweepReachesBackToOldestDailyBar:
 
 
 class TestSweepRefreshesMarketClock:
-    """Every pass also refreshes the Alpaca market clock into `meta` (via the
-    market router's `refresh_clock`), so the stored market status is kept
-    current without a browser. A clock failure is logged and never stops
-    the pair refreshes."""
+    """Every pass also refreshes the Alpaca market clock into `meta` via the
+    market router's `refresh_clock`. A clock failure is logged and never
+    stops the pair refreshes."""
 
     CLOCK = MarketClock(
         timestamp=_iso(NOW),

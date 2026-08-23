@@ -1,34 +1,7 @@
 """Startup + periodic backfill sweep for the SQLite history store.
 
-Without this module, nothing refreshes the ``bars_minute`` / ``bars_hour``
-/ ``bars_days`` tables except a user opening a chart, so after the
-backend has been down for a while (or has simply had no chart viewers)
-most of the 20 tickers' history is frozen or empty. :func:`sweep` first
-refreshes the leaderboard's ``summaries`` table if it is stale
-(:func:`app.routers.stocks.refresh_summaries` -- one snapshots call, so a
-restarted backend has a populated board before any browser polls), then
-refreshes the cached Alpaca market clock if it is stale
-(:func:`app.routers.market.refresh_clock` -- into the ``meta`` table, same
-fresh-skipping single-flight shape; a clock outage is logged and never
-stops the rest of the pass), then walks every (tier, ticker) pair -- tier-major, so all the cheap minute
-bars land before the hourly and daily ones -- and, for each pair whose
-``fetch_log`` entry has lapsed past the tier's freshness window, calls
-:func:`app.routers.stocks.refresh_history`: the very same lock + lease +
-fetch + upsert + ``record_fetch`` + prune path the history endpoint uses,
-so a request and the sweep can never double-fetch a pair or disagree
-about what "fresh" means. Fresh pairs cost zero Alpaca calls.
-
-Failure policy: the sweep must never crash the process. A rate-limited
-fetch pauses ``config.BACKFILL_RATE_LIMIT_PAUSE_SECONDS`` and retries that
-pair once more before moving on; any other error is logged (logger
-``app.backfill``) and skipped -- the pair stays stale in ``fetch_log`` and
-is picked up by the next pass or the next chart request.
-
-:func:`run_forever` runs one sweep immediately and then one every
-``config.BACKFILL_INTERVAL_SECONDS``, until cancelled (which
-:mod:`app.main`'s lifespan does on shutdown). Config is read via the
-``config`` module attributes at call time so tests can monkeypatch it;
-``_sleep`` is a module-level seam so tests can skip the waits.
+Reuses the endpoints' own lock/fetch/upsert path, so a request and the sweep
+never double-fetch a pair or disagree about "fresh". Must never crash.
 """
 
 from __future__ import annotations
@@ -45,8 +18,7 @@ from app.tickers import TICKER_SYMBOLS
 
 logger = logging.getLogger("app.backfill")
 
-# Test seam (monkeypatch to a recording no-op): every wait in this module
-# goes through here, never through `asyncio.sleep` directly.
+# Test seam: every wait goes through here, never `asyncio.sleep` directly.
 _sleep = asyncio.sleep
 
 
@@ -87,12 +59,7 @@ async def _refresh_summaries() -> None:
 
 
 async def _refresh_clock() -> None:
-    """Refresh the cached market clock (`meta`) if stale; never raises.
-
-    ``market_router.refresh_clock`` already swallows ``AlpacaError``
-    (logged at WARNING); this wrapper only guards against an unexpected
-    non-Alpaca failure, matching ``_refresh_summaries``.
-    """
+    """Refresh the cached market clock (`meta`) if stale; never raises."""
     try:
         await market_router.refresh_clock()
     except asyncio.CancelledError:
@@ -105,20 +72,12 @@ async def sweep() -> None:
     """One pass: refresh the leaderboard table, the market clock, then
     every stale (tier, ticker) pair."""
     logger.info("backfill: sweep starting")
-    # Leaderboard first: after a restart this repopulates the `summaries`
-    # table (one snapshots call) before any browser polls. Fresh-skipping
-    # and single-flight like everything else, so a concurrent request
-    # can't make it double-fetch.
     await _refresh_summaries()
-    # Market clock next: same fresh-skipping single-flight refresh, into
-    # `meta` instead of a bar table. A clock outage is logged and never
-    # stops the pair refreshes below.
     await _refresh_clock()
     for tier in TIERS:
         _timeframe, _window, freshness = stocks_router._SPEC_BY_TIER[tier]
         for ticker in TICKER_SYMBOLS:
-            # Cheap pre-check outside the lock; `refresh_history` re-checks
-            # inside it, so a concurrent request can't make us double-fetch.
+            # Pre-check outside the lock; `refresh_history` re-checks inside it.
             if stocks_router._is_history_fresh(tier, ticker, freshness):
                 continue
             await _refresh_pair(ticker, tier)

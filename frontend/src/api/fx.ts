@@ -1,15 +1,7 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import type { FxRate } from './types'
 
-/**
- * USD->GBP reference rate, fetched by the browser straight from the
- * Frankfurter API (ECB reference rates, free, no key, CORS-enabled). The
- * backend is deliberately not involved: the rate is display-only, changes
- * once a day, and Alpaca has no forex data on the free plan.
- *
- * Override the endpoint with `VITE_FX_API_URL`; whatever it returns must
- * have the Frankfurter `latest` shape (`{ date, rates: { GBP } }`).
- */
+/** USD->GBP reference rate, fetched client-side from the Frankfurter API (see README.md). Override with `VITE_FX_API_URL`; must return Frankfurter's `latest` shape. */
 export const FX_API_URL =
   import.meta.env.VITE_FX_API_URL ?? 'https://api.frankfurter.dev/v1/latest?base=USD&symbols=GBP'
 
@@ -44,11 +36,7 @@ export async function fetchUsdGbpRate(): Promise<FxRate> {
   }
 }
 
-/**
- * The one FX query in the app. Refreshes hourly; on failure React Query
- * keeps the last good rate, so a transient outage never blanks the GBP
- * figures already on screen.
- */
+/** The one FX query in the app; on failure React Query keeps the last good rate so a transient outage never blanks the GBP figures on screen. */
 export function useUsdGbpRateQuery(): UseQueryResult<FxRate, Error> {
   return useQuery({
     queryKey: fxRateKey,
