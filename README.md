@@ -9,6 +9,9 @@ This is my submission for the Oakland Engineering task. In this repository you w
 
 This application is made up of 3 main parts: a **TypeScript React** frontend, a **Python FastAPI** backend, and an **SQLite** database acting as a cache (both to serve market data quickly and to keep Alpaca calls down).
 
+
+> *Note*: The back fill after the cold start is done mostly to keep the 24h and 30d stock history fresh, as these aim to keep granular data for a shorter time frame. This is done to minimize storage while keeping a granular view of the past day/month. 
+
 Every read path is the same three steps, whichever endpoint you hit:
 
 1. **Is the stamp fresh?** (`fetch_log` for stocks and history, a boundary check for the clock.) If yes → serve straight from SQLite, zero Alpaca calls.
