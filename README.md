@@ -1,21 +1,25 @@
 # Mario's Money Makers (M³)
 
-> Code-level rationale — why the code is shaped the way it is — lives in
-> [ARCHITECTURE.md](ARCHITECTURE.md). This document describes what the system does.
+This application is currently deployed in an AWS instance and can be accessed via this domain: https://mariosmoneymakers.duckdns.org
 
 ## Overview
 
 This Repo contains a full stack application for a market tracking software. The application restricts itself to 20 stocks, the data of which is retrieved using Alpaca's API. See image below:
 
+
+<p>
+   <img width="1268" height="770" alt="image" src="https://github.com/user-attachments/assets/cc403de7-5e66-4c9e-a8f9-3a44e2b5b7eb" />
+    <em>This is the general architectural overview of how the application is currently deployed.</em>
+</p>
 Here the application is structured in three main parts:
 
 - The Front-End in TypeScript React.
 - The back end in Python and FastAPI.
 - An SQLite database acting cache to quickly access market data, as well as to limit API calls to Alpaca.
 
-A general pattern is used throughout this application. The Front-End requests some data from the back end, this in turn checks the SQLite instance of the data and checks if it is up to date. If it is, the Back-End returns the data stored in the DB. If the data is not fresh, then the Back-End calls Alpaca for a fresh set of data, updates the SQL data and serves the Front-End with the new data. This will go in further detail in the SQLite tables section.
+A general pattern is used throughout this application. The Front-End requests some data from the back end, this in turn checks the SQLite instance of the data and checks if it is up to date. If it is, the Back-End returns the data stored in the DB. If the data is not fresh, then the Back-End calls Alpaca for a fresh set of data, updates the data base and serves the Front-End with the new data. This will go in further detail in the SQLite tables section.
 
-This application is currently deployed in an AWS instance and can be accessed via this domain: https://mariosmoneymakers.duckdns.org
+
 
 ## Endpoints
 
@@ -109,27 +113,10 @@ poll, so the tier would look permanently fresh and the intraday backfill would
 never run. A legitimately empty fetch (a weekend, a thin IEX symbol) also stores
 no bars but is still a fetch, and belongs here.
 
-The leaderboard's whole-universe snapshot fetch is stamped in the same table
+The leaderboard's snapshot fetch is stamped in the same table
 under the pseudo-pair `(tier='summaries', ticker='*')`, so one freshness
 mechanism covers everything.
 
-**Single flight is in-process only.** There used to be a `fetch_claims`
-table here — a lease row with a `claim_id` fencing token, whose only job was
-stopping two backend *processes* sharing one database file from fetching the
-same pair at once. It has been removed. It never actually helped: production
-runs a single `uvicorn` process (`backend/Dockerfile` has no `--workers`),
-and the backfill sweep is an `asyncio` task inside that same process, so the
-only concurrency that was ever real is *within* one process — which the
-per-pair `asyncio.Lock`, plus re-checking the freshness stamp right after
-acquiring it, already collapses. That also drops two extra write
-transactions plus a `PRAGMA`/`CREATE TABLE IF NOT EXISTS` on every single
-fetch attempt. It's safe to drop for a second reason too: the writers never
-actually depended on the lease to stay correct — `upsert_summaries` is
-monotonic on `fetched_at`, `upsert_bars` upserts on `(ticker, ts)`, and the
-market clock is one `meta` row that just gets overwritten — so even a stray
-duplicate fetch would cost one wasted Alpaca call, never bad data. `init_db`
-now runs `DROP TABLE IF EXISTS fetch_claims` once on startup (logged at
-INFO) to clear the table out of any database file that predates this.
 
 ### `summaries` — the leaderboard's current state
 
