@@ -410,6 +410,9 @@ nothing to render.
   rows of current state plus a few thousand bars and has to survive restarts anyway; one file gives
   persistence and the "Stored data" inspection view for free, with no extra service to run or fail.
   Cost: the single-process ceiling above.
+- **Data Granularity.** Decided to use minutes/hours tables as sliding windows for where the most
+  granular data could be kept. This is in order to balance a granularity in data and the size of the
+  data base. Main concern was to minimize costs of running in AWS. 
 - **The database _is_ the cache — no in-memory layer.** Restarts cost nothing and two readers can
   never disagree about freshness. Cost: a disk read per request, microseconds at this size.
 - **Boundary-based clock expiry instead of a TTL.** Two Alpaca clock calls a day instead of ~1000,
@@ -420,6 +423,9 @@ nothing to render.
 - **A fixed 20-ticker universe.** Keeps the leaderboard one batched snapshot call per poll,
   comfortably inside the free tier, and makes data volume predictable. Cost: a code change to add a
   stock.
+- **Bugs** There are a couple of ui bugs which could be improved on were more time dedicated to this project.
+  This involves the refreshing of the Leader table to sometimes cause movements even when the data is not changing,
+  constant querying to the Back-End for newer data even when the market is closed, etc. 
 
 ## Deployment
 
