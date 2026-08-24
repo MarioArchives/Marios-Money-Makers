@@ -1,33 +1,24 @@
 # Mario's Money Makers (M³)
 
-A market-tracking dashboard for 20 US large caps, fed by Alpaca's API with SQLite
-as a durable cache. Deployed at <https://mariosmoneymakers.duckdns.org>.
+This is my submission for the Oakland Engineering task. In this repository you will find a full stack market-tracking dashboard for 20 US large caps, fed by Alpaca's API with SQLite as a durable cache. Deployed at <https://mariosmoneymakers.duckdns.org>.
 
 <p>
    <img width="1268" height="770" alt="image" src="https://github.com/user-attachments/assets/cc403de7-5e66-4c9e-a8f9-3a44e2b5b7eb" />
     <em>The general architectural overview of how the application is currently deployed.</em>
 </p>
 
-Three parts: a **TypeScript React** frontend, a **Python FastAPI** backend, and an
-**SQLite** database acting as a cache — both to serve market data quickly and to
-keep Alpaca calls down.
+This application is made up of 3 main parts: a **TypeScript React** frontend, a **Python FastAPI** backend, and an **SQLite** database acting as a cache (both to serve market data quickly and to keep Alpaca calls down).
 
 Every read path is the same three steps, whichever endpoint you hit:
 
-1. **Is the stamp fresh?** (`fetch_log` for stocks and history, a boundary check
-   for the clock.) If yes → serve straight from SQLite, zero Alpaca calls.
-2. **If not**, take the in-process `asyncio.Lock` and re-check — the worker you
-   queued behind may have just refreshed, in which case there is nothing left to
-   do. That double-checked freshness is the whole single-flight mechanism.
-3. **Fetch, write, then serve.** The response is read back from the DB after the
-   write, so the browser sees exactly what was persisted.
+1. **Is the stamp fresh?** (`fetch_log` for stocks and history, a boundary check for the clock.) If yes → serve straight from SQLite, zero Alpaca calls.
+2. **If not**, take the in-process `asyncio.Lock` and re-check — the worker you queued behind may have just refreshed, in which case there is nothing left to do. That double-checked freshness is the whole single-flight mechanism.
+3. **Fetch, write, then serve.** The response is read back from the DB after the write, so the browser sees exactly what was persisted.
 
-The backfill sweep (startup, then every 10 minutes) walks the same code paths with
-no browser involved, so a cold box populates itself, and a request and the sweep
-can never double-fetch a pair or disagree about what "fresh" means.
+The backfill sweep (startup, then every 10 minutes) walks the same code paths with no browser involved, so a cold box populates itself, and a request and the sweep can never double-fetch a pair or disagree about what "fresh" means.
 
-Code-level rationale — the decisions a contributor could undo by accident — is in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+> *Note*: The back fill after the cold start is done mostly to keep the 24h and 30d stock history fresh, as these aim to keep granular data for a shorter time frame. This is done to minimize storage while keeping a granular view of the past day/month. 
+
 
 ## Running it locally
 
@@ -451,6 +442,9 @@ nothing to render.
   rows of current state plus a few thousand bars and has to survive restarts anyway; one file gives
   persistence and the "Stored data" inspection view for free, with no extra service to run or fail.
   Cost: the single-process ceiling above.
+- **Data Granularity.** Decided to use minutes/hours tables as sliding windows for where the most
+  granular data could be kept. This is in order to balance a granularity in data and the size of the
+  data base. Main concern was to minimize costs of running in AWS. 
 - **The database _is_ the cache — no in-memory layer.** Restarts cost nothing and two readers can
   never disagree about freshness. Cost: a disk read per request, microseconds at this size.
 - **Boundary-based clock expiry instead of a TTL.** Two Alpaca clock calls a day instead of ~1000,
@@ -461,6 +455,9 @@ nothing to render.
 - **A fixed 20-ticker universe.** Keeps the leaderboard one batched snapshot call per poll,
   comfortably inside the free tier, and makes data volume predictable. Cost: a code change to add a
   stock.
+- **Bugs** There are a couple of ui bugs which could be improved on were more time dedicated to this project.
+  This involves the refreshing of the Leader table to sometimes cause movements even when the data is not changing,
+  constant querying to the Back-End for newer data even when the market is closed, etc. 
 
 ## Deployment
 
