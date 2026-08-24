@@ -1,33 +1,21 @@
 # Mario's Money Makers (M³)
 
-A market-tracking dashboard for 20 US large caps, fed by Alpaca's API with SQLite
-as a durable cache. Deployed at <https://mariosmoneymakers.duckdns.org>.
+This is my submission for the Oakland Engineering task. In this repository you will find a full stack market-tracking dashboard for 20 US large caps, fed by Alpaca's API with SQLite as a durable cache. Deployed at <https://mariosmoneymakers.duckdns.org>.
 
 <p>
    <img width="1268" height="770" alt="image" src="https://github.com/user-attachments/assets/cc403de7-5e66-4c9e-a8f9-3a44e2b5b7eb" />
     <em>The general architectural overview of how the application is currently deployed.</em>
 </p>
 
-Three parts: a **TypeScript React** frontend, a **Python FastAPI** backend, and an
-**SQLite** database acting as a cache — both to serve market data quickly and to
-keep Alpaca calls down.
+This application is made up of 3 main parts: a **TypeScript React** frontend, a **Python FastAPI** backend, and an **SQLite** database acting as a cache (both to serve market data quickly and to keep Alpaca calls down).
 
 Every read path is the same three steps, whichever endpoint you hit:
 
-1. **Is the stamp fresh?** (`fetch_log` for stocks and history, a boundary check
-   for the clock.) If yes → serve straight from SQLite, zero Alpaca calls.
-2. **If not**, take the in-process `asyncio.Lock` and re-check — the worker you
-   queued behind may have just refreshed, in which case there is nothing left to
-   do. That double-checked freshness is the whole single-flight mechanism.
-3. **Fetch, write, then serve.** The response is read back from the DB after the
-   write, so the browser sees exactly what was persisted.
+1. **Is the stamp fresh?** (`fetch_log` for stocks and history, a boundary check for the clock.) If yes → serve straight from SQLite, zero Alpaca calls.
+2. **If not**, take the in-process `asyncio.Lock` and re-check — the worker you queued behind may have just refreshed, in which case there is nothing left to do. That double-checked freshness is the whole single-flight mechanism.
+3. **Fetch, write, then serve.** The response is read back from the DB after the write, so the browser sees exactly what was persisted.
 
-The backfill sweep (startup, then every 10 minutes) walks the same code paths with
-no browser involved, so a cold box populates itself, and a request and the sweep
-can never double-fetch a pair or disagree about what "fresh" means.
-
-Code-level rationale — the decisions a contributor could undo by accident — is in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+The backfill sweep (startup, then every 10 minutes) walks the same code paths with no browser involved, so a cold box populates itself, and a request and the sweep can never double-fetch a pair or disagree about what "fresh" means.
 
 ## Running it locally
 
