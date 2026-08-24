@@ -108,6 +108,38 @@ cd frontend && npm run build     # tsc -b type-check + production build
 No test touches the network or real credentials. What each file covers is in
 [The test suite](#the-test-suite).
 
+## Configuration
+
+Nothing in the app loads a `.env` file. `config.py` reads `os.environ` directly, so whatever
+the process starts with is all it ever sees. Two different mechanisms put it there:
+
+| | Dev (Options A and B) | Production |
+| --- | --- | --- |
+| File | `.secrets.sh` | `.env`, beside `docker-compose.prod.yml` |
+| Read by | your shell, via `source` | Docker Compose |
+| When | before `docker compose up` / `uvicorn` | on every `docker compose -f docker-compose.prod.yml …` |
+| Scope | that shell only | that project |
+
+**Dev.** `docker-compose.yml` has no `env_file`; it interpolates `${KEY_ID}`/`${SECRET}` from
+the environment, so `source .secrets.sh` must happen in the *same shell* you then run
+`docker compose up` from. Option B is the same story — uvicorn inherits the shell.
+
+**Production.** `.env` is read by Compose, never by Python, and does two distinct jobs:
+
+- `env_file: .env` injects `KEY_ID`/`SECRET` into the backend container as it starts.
+- `${DOMAIN}` and `${ALLOWED_ORIGINS}` are interpolated into the compose file at *parse*
+  time, before any container exists.
+
+So `.env` has to be in place **before the first `docker compose` command**, and it is re-read
+on every subsequent one — a running container never picks up an edit, so changing it means
+`up -d` again. Compose finds it next to the compose file, so the `cd` in the deploy steps is
+convenience rather than a requirement.
+
+One asymmetry worth knowing: for the interpolated vars (`DOMAIN`, `ALLOWED_ORIGINS`) a shell
+export **overrides** `.env`, while for the `env_file` vars (`KEY_ID`, `SECRET`) `.env` wins and
+a shell export is ignored. Sourcing `.secrets.sh` out of habit on the production box therefore
+changes some settings and silently not others.
+
 ## Endpoints
 
 | URL | What it tells you |
@@ -433,7 +465,9 @@ nothing to render.
 ## Deployment
 
 Production is one small EC2 instance (Amazon Linux 2023, t3.micro with 2 GB swap) running
-two containers under Compose. Ensure that a correctly formatted .env file is present (see .env.example). 
+two containers under Compose. A correctly formatted `.env` must be present beside
+`docker-compose.prod.yml` before you deploy — `cp .env.example .env`, `chmod 600`, never
+committed. See [Configuration](#configuration) for exactly when Compose reads it.
 
 Deploying is a pull and a rebuild on the box:
 
